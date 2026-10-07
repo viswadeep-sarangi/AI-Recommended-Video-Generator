@@ -1,0 +1,71 @@
+{
+  "supabase": {
+    "url": "env:SUPABASE_URL",
+    "service_key": "env:SUPABASE_SERVICE_KEY",
+    "tables": {
+      "topics": "topics", "scripts": "scripts", "scene_files": "scene_files",
+      "video_scenes": "video_scenes", "audio_files": "audio_files", "final_videos": "final_videos"
+    },
+    "buckets": {
+      "scripts": "scripts", "scenes": "scenes", "videos": "video-scenes", "audio": "audio", "final": "final-videos"
+    }
+  },
+  "scout": {
+    "llm": {"provider": "openai", "api_key": "env:OPENAI_API_KEY", "model": "gpt-4o-mini"},
+    "lookback_days": 60,
+    "top_n": 10,
+    "notify_top_x": 5,
+    "seed_topics": ["technology", "science facts"],
+    "prepend_instructions": "You are a trend analyst for short-form video.",
+    "append_instructions": "Avoid controversial or unsafe topics.",
+    "sources": [
+      {"type": "youtube", "enabled": true, "api_key": "env:YOUTUBE_API_KEY",
+       "queries": ["technology", "science"], "order": "viewCount", "max_results": 15, "regionCode": "US"}
+    ]
+  },
+  "notifications": {"enabled": false, "type": "telegram", "bot_token": "env:TELEGRAM_BOT_TOKEN", "chat_id": "env:TELEGRAM_CHAT_ID"},
+  "script": {
+    "llm": {"provider": "openai", "api_key": "env:OPENAI_API_KEY", "model": "gpt-4o-mini"},
+    "context": "Tone: energetic, curious. Hook in the first sentence.",
+    "append_instructions": "",
+    "target_seconds": 30,
+    "words_per_second": 2.5,
+    "max_per_run": 3,
+    "folder": "scripts"
+  },
+  "scenes": {
+    "llm": {"provider": "openai", "api_key": "env:OPENAI_API_KEY", "model": "gpt-4o-mini"},
+    "min_scene_seconds": 2,
+    "max_scene_seconds": 5,
+    "prepend_instructions": "",
+    "append_instructions": "Visual prompts must be self-contained and cinematic.",
+    "folder": "scenes"
+  },
+  "video": {
+    "max_per_run": 20,
+    "folder": "video_scenes",
+    "default": ["sora", "kling"],
+    "by_category": {},
+    "providers": {
+      "sora": {"type": "sora", "api_key": "env:OPENAI_API_KEY", "model": "sora-2", "size": "720x1280"},
+      "kling": {
+        "type": "generic_http",
+        "submit_url": "https://YOUR-KLING-GATEWAY/v1/videos/text2video",
+        "status_url": "https://YOUR-KLING-GATEWAY/v1/videos/text2video/{id}",
+        "headers": {"Authorization": "env:KLING_AUTH_HEADER"},
+        "body_template": {"prompt": "{prompt}", "duration": "{duration}"},
+        "id_path": "data.task_id",
+        "status_path": "data.task_status",
+        "result_url_path": "data.task_result.videos.0.url",
+        "done_values": ["succeed"],
+        "failed_values": ["failed"]
+      }
+    }
+  },
+  "audio": {
+    "folder": "audio",
+    "voice": {"provider": "openai_tts", "api_key": "env:OPENAI_API_KEY", "voice": "alloy"},
+    "music": {"provider": "none"}
+  },
+  "assemble": {"folder": "final", "music_volume": 0.15}
+}
