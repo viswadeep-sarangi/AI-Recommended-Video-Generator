@@ -2,6 +2,7 @@
   "supabase": {
     "url": "env:SUPABASE_URL",
     "service_key": "env:SUPABASE_SERVICE_KEY",
+    "schema": "avgen",
     "tables": {
       "topics": "topics", "scripts": "scripts", "scene_files": "scene_files",
       "video_scenes": "video_scenes", "audio_files": "audio_files", "final_videos": "final_videos"
