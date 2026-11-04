@@ -64,7 +64,29 @@ def fetch_youtube(src, days):
             log.debug("YouTube video %s: %r views=%s", video["video_id"], video["title"], video["view_count"])
             videos.append(video)
     log.info("YouTube: fetched details for %d of %d unique video(s)", len(videos), len(ids))
-    return videos
+    return _filter_audio_language(videos, src.get("audio_languages"))
+
+
+def _filter_audio_language(videos, languages):
+    """Drop videos whose declared audio language isn't one of `languages`.
+
+    Matches on the primary subtag, so "en" accepts "en", "en-US", "en-GB".
+    Videos that don't declare an audio language are kept, since many uploads
+    leave it unset.
+    """
+    if not languages:
+        return videos
+    wanted = {lang.lower().split("-")[0] for lang in languages}
+    kept = []
+    for video in videos:
+        lang = ((video["raw_metadata"].get("snippet") or {}).get("defaultAudioLanguage") or "").lower()
+        if lang and lang.split("-")[0] not in wanted:
+            log.debug("YouTube video %s dropped: audio language %r", video["video_id"], lang)
+            continue
+        kept.append(video)
+    log.info("YouTube: kept %d of %d video(s) after audio language filter %s",
+             len(kept), len(videos), sorted(wanted))
+    return kept
 
 
 def _normalize_youtube_video(item):

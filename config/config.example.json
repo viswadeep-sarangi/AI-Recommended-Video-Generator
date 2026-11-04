@@ -25,7 +25,8 @@
                    "psychology facts #shorts", "what if #shorts", "deep sea creatures #shorts",
                    "ancient civilizations #shorts", "animal facts #shorts", "money facts #shorts",
                    "abandoned places #shorts"],
-       "order": "viewCount", "max_results": 15, "regionCode": "US", "videoDuration": "short"}
+       "order": "viewCount", "max_results": 15, "regionCode": "US", "videoDuration": "short",
+       "relevanceLanguage": "en", "audio_languages": ["en"]}
     ]
   },
   "notifications": {"enabled": false, "type": "telegram", "bot_token": "env:TELEGRAM_BOT_TOKEN", "chat_id": "env:TELEGRAM_CHAT_ID"},

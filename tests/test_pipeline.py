@@ -105,6 +105,19 @@ def test_fetch_youtube_fetches_and_normalizes_video_metadata(monkeypatch):
     assert calls[0][1]["videoDuration"] == "short"
 
 
+def test_audio_language_filter_keeps_matching_and_undeclared():
+    from avgen.scout import _filter_audio_language
+
+    def video(vid, lang):
+        snippet = {"defaultAudioLanguage": lang} if lang else {}
+        return {"video_id": vid, "raw_metadata": {"snippet": snippet}}
+
+    videos = [video("a", "en"), video("b", "en-US"), video("c", "hi"), video("d", None)]
+    kept = _filter_audio_language(videos, ["en"])
+    assert [v["video_id"] for v in kept] == ["a", "b", "d"]
+    assert _filter_audio_language(videos, None) == videos
+
+
 def test_scout_keeps_youtube_signals_when_storage_fails(monkeypatch):
     class FailingDB(FakeDB):
         def upsert(self, *a):
