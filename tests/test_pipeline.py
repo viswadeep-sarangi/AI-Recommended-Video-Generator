@@ -5,7 +5,7 @@ import pytest
 from avgen.config import _resolve
 from avgen.llm import LLM, extract_json, wrap_prompt
 from avgen.scene_generator import SceneGenerator, normalize_scenes
-from avgen.scout import RecommendationFinder, fetch_youtube
+from avgen.scout import SOURCES, RecommendationFinder, fetch_youtube
 from avgen.video import VideoGenerator
 from avgen.video_pipeline import VideoPipeline
 
@@ -102,6 +102,35 @@ def test_fetch_youtube_fetches_and_normalizes_video_metadata(monkeypatch):
     assert videos[0]["dislike_count"] is None
     assert videos[0]["raw_metadata"]["id"] == "abc123"
     assert len(calls) == 2 and "abc123" in calls[1][1]["id"]
+
+
+def test_scout_keeps_youtube_signals_when_storage_fails(monkeypatch):
+    class FailingDB(FakeDB):
+        def upsert(self, *a):
+            raise RuntimeError("HTTP 403: permission denied")
+
+    video = {"video_id": "v1", "title": "Trend", "view_count": 5}
+    monkeypatch.setitem(SOURCES, "youtube", lambda src, days: [video])
+    llm = FakeLLM('[{"title": "T", "score": 5}]')
+    db = FailingDB()
+    rows = RecommendationFinder(llm, db, {"sources": [{"type": "youtube"}]}).run()
+    assert rows and "[youtube] Trend" in llm.prompts[0]
+
+
+def test_check_response_includes_body():
+    import requests
+
+    from avgen.log import check_response
+
+    class Response:
+        status_code, text = 403, '{"code":"42501","message":"permission denied for table youtube_videos"}'
+
+        def raise_for_status(self):
+            raise requests.HTTPError("403 Client Error: Forbidden for url: https://x?key=SECRET")
+
+    with pytest.raises(requests.HTTPError) as e:
+        check_response(Response(), "Supabase upsert")
+    assert "42501" in str(e.value) and "SECRET" not in str(e.value)
 
 
 def test_scene_durations_clamped():

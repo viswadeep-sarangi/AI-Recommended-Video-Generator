@@ -3,6 +3,12 @@ on:
   schedule:
     - cron: "0 6 * * *"
   workflow_dispatch:
+    inputs:
+      log_level:
+        description: "Log level (DEBUG also prints the full LLM prompt and reply)"
+        type: choice
+        options: [DEBUG, INFO]
+        default: DEBUG
 jobs:
   scout:
     runs-on: ubuntu-latest
@@ -14,6 +20,8 @@ jobs:
       - run: cp config/config.example.json config/config.json
       - run: python -m avgen scout
         env:
+          PYTHONUNBUFFERED: "1"
+          AVGEN_LOG_LEVEL: ${{ inputs.log_level || 'DEBUG' }}
           SUPABASE_URL: ${{ secrets.SUPABASE_URL }}
           SUPABASE_SERVICE_KEY: ${{ secrets.SUPABASE_SERVICE_KEY }}
           OPENAI_API_KEY: ${{ secrets.OPENAI_API_KEY }}
