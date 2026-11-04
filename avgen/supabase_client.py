@@ -8,6 +8,7 @@ class SupabaseClient:
     def __init__(self, cfg, session=None):
         self.url = cfg["url"].rstrip("/")
         self.key = cfg["service_key"]
+        self.schema = cfg.get("schema", "avgen")
         self.tables = cfg.get("tables", {})
         self.buckets = cfg.get("buckets", {})
         self.http = session or requests
@@ -23,16 +24,40 @@ class SupabaseClient:
         h.update(extra)
         return h
 
+    def _table_headers(self, profile_header, **extra):
+        return self._headers(**{profile_header: self.schema, **extra})
+
     def insert(self, table, row):
         r = self.http.post(
             f"{self.url}/rest/v1/{self.table(table)}",
             json=row,
-            headers=self._headers(**{"Content-Type": "application/json", "Prefer": "return=representation"}),
+            headers=self._table_headers(
+                "Content-Profile",
+                **{"Content-Type": "application/json", "Prefer": "return=representation"},
+            ),
             timeout=60,
         )
         r.raise_for_status()
         data = r.json()
         return data[0] if isinstance(data, list) and not isinstance(row, list) else data
+
+    def upsert(self, table, row, conflict_column):
+        r = self.http.post(
+            f"{self.url}/rest/v1/{self.table(table)}",
+            params={"on_conflict": conflict_column},
+            json=row,
+            headers=self._table_headers(
+                "Content-Profile",
+                **{
+                    "Content-Type": "application/json",
+                    "Prefer": "resolution=merge-duplicates,return=representation",
+                },
+            ),
+            timeout=60,
+        )
+        r.raise_for_status()
+        data = r.json()
+        return data[0] if isinstance(data, list) else data
 
     def select(self, table, filters=None, order=None, limit=None):
         """filters: {"status": "eq.new"} using PostgREST operators."""
@@ -42,7 +67,10 @@ class SupabaseClient:
         if limit:
             params["limit"] = limit
         r = self.http.get(
-            f"{self.url}/rest/v1/{self.table(table)}", params=params, headers=self._headers(), timeout=60
+            f"{self.url}/rest/v1/{self.table(table)}",
+            params=params,
+            headers=self._table_headers("Accept-Profile"),
+            timeout=60,
         )
         r.raise_for_status()
         return r.json()
@@ -52,7 +80,10 @@ class SupabaseClient:
             f"{self.url}/rest/v1/{self.table(table)}",
             params=filters,
             json=values,
-            headers=self._headers(**{"Content-Type": "application/json", "Prefer": "return=representation"}),
+            headers=self._table_headers(
+                "Content-Profile",
+                **{"Content-Type": "application/json", "Prefer": "return=representation"},
+            ),
             timeout=60,
         )
         r.raise_for_status()

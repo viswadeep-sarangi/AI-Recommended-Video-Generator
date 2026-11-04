@@ -5,7 +5,7 @@ import pytest
 from avgen.config import _resolve
 from avgen.llm import LLM, extract_json, wrap_prompt
 from avgen.scene_generator import SceneGenerator, normalize_scenes
-from avgen.scout import RecommendationFinder
+from avgen.scout import RecommendationFinder, fetch_youtube
 from avgen.video import VideoGenerator
 from avgen.video_pipeline import VideoPipeline
 
@@ -58,6 +58,50 @@ def test_scout_wraps_and_stores():
     rows = RecommendationFinder(llm, db, cfg).run()
     assert rows[0]["title"] == "T" and db.tables["topics"]
     assert llm.prompts[0].startswith("PRE") and llm.prompts[0].endswith("POST")
+
+
+def test_fetch_youtube_fetches_and_normalizes_video_metadata(monkeypatch):
+    class Response:
+        def __init__(self, payload):
+            self.payload = payload
+
+        def raise_for_status(self):
+            pass
+
+        def json(self):
+            return self.payload
+
+    calls = []
+
+    def get(url, params, timeout):
+        calls.append((url, params, timeout))
+        if "search" in url:
+            return Response({"items": [{"id": {"videoId": "abc123"}, "snippet": {"title": "ignored here"}}]})
+        return Response({"items": [{
+            "id": "abc123",
+            "snippet": {
+                "title": "Full title", "description": "Full description",
+                "channelId": "channel-id", "channelTitle": "Uploader",
+                "publishedAt": "2025-01-02T03:04:05Z",
+                "tags": ["one"], "thumbnails": {"default": {"url": "https://img"}},
+            },
+            "contentDetails": {"duration": "PT1M2S", "caption": "true"},
+            "statistics": {"viewCount": "123", "likeCount": "10", "commentCount": "2"},
+            "status": {"privacyStatus": "public"},
+        }]})
+
+    monkeypatch.setattr("avgen.scout.requests.get", get)
+    videos = fetch_youtube({"api_key": "key", "queries": ["science"]}, 30)
+
+    assert len(videos) == 1
+    assert videos[0]["title"] == "Full title"
+    assert videos[0]["description"] == "Full description"
+    assert videos[0]["channel_title"] == "Uploader"
+    assert videos[0]["published_at"] == "2025-01-02T03:04:05Z"
+    assert videos[0]["view_count"] == 123 and videos[0]["like_count"] == 10
+    assert videos[0]["dislike_count"] is None
+    assert videos[0]["raw_metadata"]["id"] == "abc123"
+    assert len(calls) == 2 and "abc123" in calls[1][1]["id"]
 
 
 def test_scene_durations_clamped():
