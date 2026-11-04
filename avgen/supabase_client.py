@@ -41,6 +41,24 @@ class SupabaseClient:
         data = r.json()
         return data[0] if isinstance(data, list) and not isinstance(row, list) else data
 
+    def upsert(self, table, row, conflict_column):
+        r = self.http.post(
+            f"{self.url}/rest/v1/{self.table(table)}",
+            params={"on_conflict": conflict_column},
+            json=row,
+            headers=self._table_headers(
+                "Content-Profile",
+                **{
+                    "Content-Type": "application/json",
+                    "Prefer": "resolution=merge-duplicates,return=representation",
+                },
+            ),
+            timeout=60,
+        )
+        r.raise_for_status()
+        data = r.json()
+        return data[0] if isinstance(data, list) else data
+
     def select(self, table, filters=None, order=None, limit=None):
         """filters: {"status": "eq.new"} using PostgREST operators."""
         params = dict(filters or {})
