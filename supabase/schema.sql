@@ -54,4 +54,6 @@ alter default privileges in schema avgen
 alter default privileges in schema avgen
   grant all on sequences to service_role;
 
+notify pgrst, 'reload schema';
+
 -- Create storage buckets: scripts, scenes, video-scenes, audio, final-videos
