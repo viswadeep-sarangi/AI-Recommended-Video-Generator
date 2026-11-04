@@ -91,7 +91,7 @@ def test_fetch_youtube_fetches_and_normalizes_video_metadata(monkeypatch):
         }]})
 
     monkeypatch.setattr("avgen.scout.requests.get", get)
-    videos = fetch_youtube({"api_key": "key", "queries": ["science"]}, 30)
+    videos = fetch_youtube({"api_key": "key", "queries": ["science"], "videoDuration": "short"}, 30)
 
     assert len(videos) == 1
     assert videos[0]["title"] == "Full title"
@@ -102,6 +102,7 @@ def test_fetch_youtube_fetches_and_normalizes_video_metadata(monkeypatch):
     assert videos[0]["dislike_count"] is None
     assert videos[0]["raw_metadata"]["id"] == "abc123"
     assert len(calls) == 2 and "abc123" in calls[1][1]["id"]
+    assert calls[0][1]["videoDuration"] == "short"
 
 
 def test_scout_keeps_youtube_signals_when_storage_fails(monkeypatch):

@@ -21,7 +21,11 @@
     "append_instructions": "Avoid controversial or unsafe topics.",
     "sources": [
       {"type": "youtube", "enabled": true, "api_key": "env:YOUTUBE_API_KEY",
-       "queries": ["technology", "science"], "order": "viewCount", "max_results": 15, "regionCode": "US"}
+       "queries": ["scary stories #shorts", "unsolved mysteries #shorts", "dark history #shorts",
+                   "psychology facts #shorts", "what if #shorts", "deep sea creatures #shorts",
+                   "ancient civilizations #shorts", "animal facts #shorts", "money facts #shorts",
+                   "abandoned places #shorts"],
+       "order": "viewCount", "max_results": 15, "regionCode": "US", "videoDuration": "short"}
     ]
   },
   "notifications": {"enabled": false, "type": "telegram", "bot_token": "env:TELEGRAM_BOT_TOKEN", "chat_id": "env:TELEGRAM_CHAT_ID"},

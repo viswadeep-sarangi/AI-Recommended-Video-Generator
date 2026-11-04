@@ -15,6 +15,8 @@ YOUTUBE_PARTS = (
     "snippet,contentDetails,statistics,status,liveStreamingDetails,"
     "topicDetails,recordingDetails,player,localizations"
 )
+# Optional search.list filters passed through from the source config when set.
+YOUTUBE_FILTERS = ("regionCode", "videoCategoryId", "relevanceLanguage", "videoDuration")
 
 
 def fetch_youtube(src, days):
@@ -23,7 +25,7 @@ def fetch_youtube(src, days):
         "part": "snippet", "type": "video", "order": src.get("order", "viewCount"),
         "publishedAfter": after, "maxResults": src.get("max_results", 15), "key": src["api_key"],
     }
-    for k in ("regionCode", "videoCategoryId", "relevanceLanguage"):
+    for k in YOUTUBE_FILTERS:
         if src.get(k):
             params[k] = src[k]
     if not src.get("api_key"):
@@ -31,7 +33,7 @@ def fetch_youtube(src, days):
     log.info(
         "YouTube search: queries=%s published_after=%s order=%s max_results=%s filters=%s",
         src.get("queries") or [""], after, params["order"], params["maxResults"],
-        {k: params[k] for k in ("regionCode", "videoCategoryId", "relevanceLanguage") if k in params},
+        {k: params[k] for k in YOUTUBE_FILTERS if k in params},
     )
     search_results = {}
     for q in src.get("queries") or [""]:
