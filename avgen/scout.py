@@ -171,8 +171,6 @@ class RecommendationFinder:
             except Exception:  # one failing source should not stop the run
                 log.exception("source %s failed; its trends will not be used", src.get("type"))
         log.info("gathered %d trending signal(s)", len(signals))
-        if not signals:
-            log.warning("no trending signals were gathered; the LLM will pick topics from its own knowledge")
         return signals
 
     def _store_youtube_videos(self, records):
@@ -210,13 +208,20 @@ class RecommendationFinder:
         body = (
             f"Recommend the top {n} trending topics for short-form videos from the last "
             f"{self.cfg.get('lookback_days', 60)} days. Focus areas: {seeds}.\n"
-            "Trending signals:\n" + ("\n".join(signals) or "(none available; use your own knowledge)") +
+            "Base every topic on the trending signals below. Do not suggest topics that "
+            "are not supported by these signals.\n"
+            "Trending signals:\n" + "\n".join(signals) +
             '\n\nReply ONLY with JSON: [{"title": str, "description": str, "score": number 0-100}]'
         )
         return wrap_prompt(body, self.cfg.get("prepend_instructions", ""), self.cfg.get("append_instructions", ""))
 
     def run(self):
-        prompt = self.build_prompt(self.gather_signals())
+        signals = self.gather_signals()
+        if not signals:
+            # Without real trend data the LLM would only be guessing, so stop here.
+            raise RuntimeError("no trending signals were gathered; not asking the LLM for topics "
+                               "(check the source errors above)")
+        prompt = self.build_prompt(signals)
         log.info("asking LLM for topics (prompt: %d chars)", len(prompt))
         log.debug("LLM prompt:\n%s", prompt)
         reply = self.llm.complete(prompt)

@@ -51,13 +51,22 @@ def test_helpers():
     assert wrap_prompt("b", "a", "c") == "a\n\nb\n\nc"
 
 
-def test_scout_wraps_and_stores():
+def test_scout_wraps_and_stores(monkeypatch):
+    monkeypatch.setitem(SOURCES, "youtube", lambda src, days: [{"video_id": "v1", "title": "Trend"}])
     llm = FakeLLM('[{"title": "T", "score": 5}]')
     db = FakeDB()
-    cfg = {"prepend_instructions": "PRE", "append_instructions": "POST", "sources": []}
+    cfg = {"prepend_instructions": "PRE", "append_instructions": "POST", "sources": [{"type": "youtube"}]}
     rows = RecommendationFinder(llm, db, cfg).run()
     assert rows[0]["title"] == "T" and db.tables["topics"]
     assert llm.prompts[0].startswith("PRE") and llm.prompts[0].endswith("POST")
+
+
+def test_scout_stops_without_signals():
+    llm = FakeLLM('[{"title": "T", "score": 5}]')
+    db = FakeDB()
+    with pytest.raises(RuntimeError, match="no trending signals"):
+        RecommendationFinder(llm, db, {"sources": []}).run()
+    assert llm.prompts == [] and "topics" not in db.tables
 
 
 def test_fetch_youtube_fetches_and_normalizes_video_metadata(monkeypatch):
