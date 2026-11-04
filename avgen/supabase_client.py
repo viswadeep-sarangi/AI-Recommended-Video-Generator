@@ -24,6 +24,15 @@ class SupabaseClient:
         h.update(extra)
         return h
 
+    def _raise_for_status(self, r, table):
+        if getattr(r, "status_code", None) in (404, 406):
+            raise requests.HTTPError(
+                f"{r.status_code} for table '{self.schema}.{self.table(table)}': apply supabase/schema.sql "
+                f"and add '{self.schema}' to Settings > API > Exposed schemas in Supabase",
+                response=r,
+            )
+        self._raise_for_status(r, table)
+
     def _table_headers(self, profile_header, **extra):
         return self._headers(**{profile_header: self.schema, **extra})
 
@@ -37,7 +46,7 @@ class SupabaseClient:
             ),
             timeout=60,
         )
-        r.raise_for_status()
+        self._raise_for_status(r, table)
         data = r.json()
         return data[0] if isinstance(data, list) and not isinstance(row, list) else data
 
@@ -55,7 +64,7 @@ class SupabaseClient:
             ),
             timeout=60,
         )
-        r.raise_for_status()
+        self._raise_for_status(r, table)
         data = r.json()
         return data[0] if isinstance(data, list) else data
 
@@ -72,7 +81,7 @@ class SupabaseClient:
             headers=self._table_headers("Accept-Profile"),
             timeout=60,
         )
-        r.raise_for_status()
+        self._raise_for_status(r, table)
         return r.json()
 
     def update(self, table, filters, values):
@@ -86,7 +95,7 @@ class SupabaseClient:
             ),
             timeout=60,
         )
-        r.raise_for_status()
+        self._raise_for_status(r, table)
         return r.json()
 
     def upload(self, bucket, path, data, content_type="application/octet-stream"):
