@@ -1,0 +1,27 @@
+name: Daily scenes
+on:
+  schedule:
+    - cron: "0 8 * * *"  # one hour after the daily scripts (07:00 UTC)
+  workflow_dispatch:
+    inputs:
+      log_level:
+        description: "Log level (DEBUG also prints the full script, LLM prompt, LLM reply and scene file)"
+        type: choice
+        options: [DEBUG, INFO]
+        default: DEBUG
+jobs:
+  scenes:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with: {python-version: "3.12"}
+      - run: pip install -r requirements.txt
+      - run: cp config/config.example.json config/config.json
+      - run: python -m avgen scenes
+        env:
+          PYTHONUNBUFFERED: "1"
+          AVGEN_LOG_LEVEL: ${{ inputs.log_level || 'DEBUG' }}
+          SUPABASE_URL: ${{ secrets.SUPABASE_URL }}
+          SUPABASE_SERVICE_KEY: ${{ secrets.SUPABASE_SERVICE_KEY }}
+          OPENAI_API_KEY: ${{ secrets.OPENAI_API_KEY }}

@@ -42,6 +42,9 @@
     "llm": {"provider": "openai", "api_key": "env:OPENAI_API_KEY", "model": "gpt-4o-mini"},
     "min_scene_seconds": 2,
     "max_scene_seconds": 5,
+    "max_per_run": 20,
+    "llm_attempts": 2,
+    "words_per_second": 2.5,
     "prepend_instructions": "",
     "append_instructions": "Visual prompts must be self-contained and cinematic."
   },

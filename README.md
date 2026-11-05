@@ -4,7 +4,7 @@ Pipeline (all state in the Supabase `avgen` schema plus storage buckets, see `su
 
 1. `scout` – YouTube search and video details are stored in `youtube_videos`; the LLM uses those signals to create rows in `topics` (optional Telegram notification). Runs daily via `.github/workflows/daily-scout.yml`.
 2. `scripts` – topics -> script file in storage + `scripts` log row.
-3. `scenes` – scripts -> 2–5 s scene JSON + `scene_files` log row.
+3. `scenes` – scripts -> 2–5 s scene JSON + `scene_files` log row. The LLM's reply is checked (and retried once if unusable); a failing script is skipped and retried next run. Up to `max_per_run` (20) scripts per run. Runs daily via `.github/workflows/daily-scenes.yml`.
 4. `videos` – scenes without clips -> video provider (Sora, generic HTTP such as Kling, with fallback / per-category routing) -> storage + `video_scenes` log.
 5. `audio` – narration (TTS) and optional music -> storage + `audio_files` log.
 6. `assemble` – ffmpeg merges clips + audio -> `final_videos`. (YouTube upload is a future extension.)

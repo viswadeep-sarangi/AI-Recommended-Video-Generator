@@ -4,7 +4,8 @@ import pytest
 
 from avgen.config import _resolve
 from avgen.llm import LLM, extract_json, wrap_prompt
-from avgen.scene_generator import SceneGenerator, normalize_scenes
+from avgen.scene_generator import (InvalidSceneReply, SceneGenerationError, SceneGenerator, normalize_scenes,
+                                   parse_scene_reply)
 from avgen.scout import SOURCES, RecommendationFinder, fetch_youtube
 from avgen.video import VideoGenerator
 from avgen.video_pipeline import VideoPipeline
@@ -177,6 +178,74 @@ def test_check_response_includes_body():
 def test_scene_durations_clamped():
     s = normalize_scenes([{"duration": 1}, {"duration": 9}, {"duration": 3}])
     assert [x["duration"] for x in s] == [2, 5, 3] and [x["index"] for x in s] == [0, 1, 2]
+
+
+GOOD_SCENES = '[{"narration":"a b","visual_prompt":"p1","duration":3},{"narration":"c","visual_prompt":"p2","duration":"4"}]'
+
+
+def test_scene_reply_accepts_expected_shape():
+    scenes = parse_scene_reply("```json\n" + GOOD_SCENES + "\n```")
+    assert [s["duration"] for s in scenes] == [3.0, 4.0]
+    wrapped = parse_scene_reply('{"scenes": ' + GOOD_SCENES + "}")
+    assert [s["visual_prompt"] for s in wrapped] == ["p1", "p2"]
+
+
+@pytest.mark.parametrize("reply", [
+    "Sure! Here are your scenes.",                                      # not JSON
+    '{"narration": "a"}',                                               # object, not a list
+    "[]",                                                               # empty list
+    '["just text"]',                                                    # item isn't an object
+    '[{"narration": "a", "duration": 3}]',                              # no visual_prompt
+    '[{"narration": " ", "visual_prompt": "p", "duration": 3}]',        # blank narration
+    '[{"narration": "a", "visual_prompt": "p", "duration": "soon"}]',   # duration not a number
+    '[{"narration": "a", "visual_prompt": "p", "duration": 0}]',        # duration not positive
+    '[{"narration": "a", "visual_prompt": "p", "duration": true}]',     # duration is a boolean
+])
+def test_scene_reply_rejects_unexpected_shapes(reply):
+    with pytest.raises(InvalidSceneReply):
+        parse_scene_reply(reply)
+
+
+def _db_with_scripts(count, missing_file_ids=()):
+    db = FakeDB()
+    for n in range(1, count + 1):
+        db.insert("scripts", {"topic_id": None, "file_path": f"s{n}.txt"})
+        if n not in missing_file_ids:
+            db.upload("scripts", f"s{n}.txt", b"a b c")
+    return db
+
+
+def test_scene_generator_skips_a_failing_script_and_keeps_going():
+    db = _db_with_scripts(3, missing_file_ids={2})
+    rows = SceneGenerator(FakeLLM(GOOD_SCENES), db, {}).run_pending()
+    assert [r["script_id"] for r in rows] == [1, 3]
+    assert [r["script_id"] for r in db.tables["scene_files"]] == [1, 3]  # script 2 is retried next run
+
+
+def test_scene_generator_respects_max_per_run():
+    db = _db_with_scripts(3)
+    gen = SceneGenerator(FakeLLM(GOOD_SCENES), db, {"max_per_run": 2})
+    assert [r["script_id"] for r in gen.run_pending()] == [1, 2]
+    assert [r["script_id"] for r in gen.run_pending()] == [3]
+    assert gen.run_pending() == []
+
+
+def test_scene_generator_asks_again_after_an_unusable_reply():
+    class FlakyLLM(FakeLLM):
+        def complete(self, prompt, system=""):
+            self.prompts.append(prompt)
+            return "not json" if len(self.prompts) == 1 else GOOD_SCENES
+
+    llm = FlakyLLM(None)
+    rows = SceneGenerator(llm, _db_with_scripts(1), {}).run_pending()
+    assert len(rows) == 1 and len(llm.prompts) == 2
+
+
+def test_scene_generator_raises_when_every_script_fails():
+    db = _db_with_scripts(2)
+    with pytest.raises(SceneGenerationError):
+        SceneGenerator(FakeLLM("not json"), db, {"llm_attempts": 2}).run_pending()
+    assert "scene_files" not in db.tables
 
 
 def test_video_pipeline_generates_only_missing_and_falls_back():
