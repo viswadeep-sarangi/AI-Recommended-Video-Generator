@@ -1,0 +1,31 @@
+name: Daily videos
+on:
+  schedule:
+    - cron: "0 9 * * *"  # one hour after the daily scenes (08:00 UTC)
+  workflow_dispatch:
+    inputs:
+      log_level:
+        description: "Log level (DEBUG also prints full visual prompts and Kling requests)"
+        type: choice
+        options: [DEBUG, INFO]
+        default: DEBUG
+jobs:
+  videos:
+    runs-on: ubuntu-latest
+    # Each Kling clip can take several minutes and a run makes every clip of one
+    # script (max_scene_files_per_run), so allow plenty of time.
+    timeout-minutes: 180
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with: {python-version: "3.12"}
+      - run: pip install -r requirements.txt
+      - run: cp config/config.example.json config/config.json
+      - run: python -m avgen videos
+        env:
+          PYTHONUNBUFFERED: "1"
+          AVGEN_LOG_LEVEL: ${{ inputs.log_level || 'DEBUG' }}
+          SUPABASE_URL: ${{ secrets.SUPABASE_URL }}
+          SUPABASE_SERVICE_KEY: ${{ secrets.SUPABASE_SERVICE_KEY }}
+          KLING_ACCESS_KEY: ${{ secrets.KLING_ACCESS_KEY }}
+          KLING_SECRET_KEY: ${{ secrets.KLING_SECRET_KEY }}

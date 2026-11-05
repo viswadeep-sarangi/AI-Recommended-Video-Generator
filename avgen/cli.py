@@ -11,7 +11,7 @@ from .scene_generator import SceneGenerator
 from .script_generator import ScriptGenerator
 from .scout import RecommendationFinder, create_notifier
 from .supabase_client import SupabaseClient
-from .video import VideoGenerator
+from .video import create_video_provider
 from .video_pipeline import VideoPipeline
 
 log = logging.getLogger("avgen")
@@ -38,7 +38,7 @@ def main(argv=None):
             elif st == "scenes":
                 res = SceneGenerator(create_llm(cfg["scenes"]["llm"]), db, cfg["scenes"]).run_pending()
             elif st == "videos":
-                res = VideoPipeline(db, VideoGenerator(cfg["video"]), cfg["video"]).run(cfg["video"].get("max_per_run"))
+                res = VideoPipeline(db, create_video_provider(cfg["video"]["provider"]), cfg["video"]).run()
             elif st == "audio":
                 res = AudioGenerator(db, cfg["audio"]).run_pending()
             else:

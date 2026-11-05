@@ -1,35 +1,24 @@
-from .base import VideoProvider
-from .providers import GenericHTTPProvider, SoraProvider
+"""Video providers: services that turn a text description into an mp4 clip.
 
-PROVIDERS = {"sora": SoraProvider, "generic_http": GenericHTTPProvider}
+Only Kling AI is set up for now. The "provider" part of the "video" config
+section picks it:
+
+    "provider": {"type": "kling", "access_key": "env:KLING_ACCESS_KEY", ...}
+
+To add another service later, write a VideoProvider subclass and register it
+with register_video_provider("name", TheClass).
+"""
+from .base import VideoProvider
+from .kling import KlingProvider
+
+PROVIDERS = {"kling": KlingProvider}
 
 
 def register_video_provider(name, cls):
     PROVIDERS[name] = cls
 
 
-class VideoGenerator:
-    """Single entry point. Picks providers by topic category and falls back on failure
-    (e.g. when tokens run out), so the backend can be swapped from config alone.
-
-    cfg: {"providers": {name: {"type": ..., ...}}, "default": [names...], "by_category": {cat: [names...]}}
-    """
-
-    def __init__(self, cfg, providers=None):
-        self.cfg = cfg
-        self.providers = providers or {
-            n: PROVIDERS[p["type"]](**{k: v for k, v in p.items() if k != "type"})
-            for n, p in cfg["providers"].items()
-        }
-
-    def order(self, category=None):
-        return self.cfg.get("by_category", {}).get(category) or self.cfg["default"]
-
-    def generate(self, prompt, duration, category=None):
-        errors = []
-        for name in self.order(category):
-            try:
-                return name, self.providers[name].generate(prompt, duration)
-            except Exception as e:
-                errors.append(f"{name}: {e}")
-        raise RuntimeError("all video providers failed: " + "; ".join(errors))
+def create_video_provider(cfg):
+    """cfg: {"type": "kling", ...settings for that provider}"""
+    cfg = dict(cfg)
+    return PROVIDERS[cfg.pop("type", "kling")](**cfg)

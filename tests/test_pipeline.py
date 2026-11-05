@@ -7,8 +7,8 @@ from avgen.llm import LLM, extract_json, wrap_prompt
 from avgen.scene_generator import (InvalidSceneReply, SceneGenerationError, SceneGenerator, normalize_scenes,
                                    parse_scene_reply)
 from avgen.scout import SOURCES, RecommendationFinder, fetch_youtube
-from avgen.video import VideoGenerator
-from avgen.video_pipeline import VideoPipeline
+from avgen.video import create_video_provider
+from avgen.video_pipeline import VideoGenerationError, VideoPipeline
 
 
 class FakeDB:
@@ -27,8 +27,11 @@ class FakeDB:
             rows = [r for r in rows if str(r.get(k)) == v.split(".", 1)[1]]
         return rows
 
-    def update(self, *a):
-        pass
+    def update(self, t, filters, values):
+        rows = self.select(t, filters)
+        for row in rows:
+            row.update(values)
+        return [dict(row) for row in rows]
 
     def upload(self, b, p, data, ct=None):
         self.files[(b, p)] = data
@@ -248,26 +251,112 @@ def test_scene_generator_raises_when_every_script_fails():
     assert "scene_files" not in db.tables
 
 
-def test_video_pipeline_generates_only_missing_and_falls_back():
+def _db_with_scene_files(count, scenes='[{"narration":"a","visual_prompt":"p1","duration":3},'
+                                       '{"narration":"b","visual_prompt":"p2","duration":3}]'):
     db = FakeDB()
-    db.insert("scripts", {"topic_id": 1, "file_path": "s.txt"})
-    db.upload("scripts", "s.txt", b"hi")
-    scenes = '[{"narration":"a","visual_prompt":"p1","duration":3},{"narration":"b","visual_prompt":"p2","duration":3}]'
+    for number in range(count):
+        db.insert("scripts", {"topic_id": 1, "file_path": f"s{number}.txt"})
+        db.upload("scripts", f"s{number}.txt", b"hi")
     SceneGenerator(FakeLLM(scenes), db, {}).run_pending()
+    return db
 
-    class Bad:
-        def generate(self, p, d):
-            raise RuntimeError("out of tokens")
 
-    class Good:
-        def generate(self, p, d):
-            return b"mp4"
+class FakeProvider:
+    """Makes clips, except for prompts in `fail_on` (each failing `times` times, forever if None)."""
+    name = "fake"
 
-    gen = VideoGenerator({"default": ["bad", "good"]}, {"bad": Bad(), "good": Good()})
-    pipe = VideoPipeline(db, gen)
-    assert len(pipe.run(limit=1)) == 1
-    assert db.tables["video_scenes"][0]["provider"] == "good"
-    assert len(pipe.run()) == 1  # only the remaining scene
-    assert pipe.run() == []
-    with pytest.raises(RuntimeError):
-        VideoGenerator({"default": ["bad"]}, {"bad": Bad()}).generate("x", 3)
+    def __init__(self, fail_on=(), times=None):
+        self.fail_on, self.times, self.failures = set(fail_on), times, {}
+
+    def generate(self, prompt, duration):
+        if prompt in self.fail_on and (self.times is None or self.failures.get(prompt, 0) < self.times):
+            self.failures[prompt] = self.failures.get(prompt, 0) + 1
+            raise RuntimeError("busy")
+        return b"mp4"
+
+
+def test_video_pipeline_does_one_scene_file_per_run_and_retries_on_the_same_row():
+    db = _db_with_scene_files(2)
+    pipe = VideoPipeline(db, FakeProvider(fail_on={"p2"}, times=1))
+
+    first = pipe.run()  # only the first scene file; scene p2 fails
+    assert [(r["script_id"], r["status"], r["attempts"]) for r in first] == [(1, "done", 1), (1, "failed", 1)]
+    assert first[0]["provider"] == "fake" and first[0]["file_path"].endswith("/scene_000.mp4")
+
+    second = pipe.run()  # still the first file: only the failed scene is retried
+    assert [(r["script_id"], r["scene_index"], r["status"], r["attempts"]) for r in second] == [(1, 1, "done", 2)]
+    assert len(db.tables["video_scenes"]) == 2  # the retry updated the scene's row, no new one
+
+    third = pipe.run()  # now the second file
+    assert [(r["script_id"], r["status"]) for r in third] == [(2, "done"), (2, "done")]
+    assert VideoPipeline(db, FakeProvider(), {"max_scene_files_per_run": 5}).run() == []
+
+
+def test_video_pipeline_gives_up_on_a_scene_after_max_attempts():
+    db = _db_with_scene_files(2)
+    pipe = VideoPipeline(db, FakeProvider(fail_on={"p2"}), {"max_attempts_per_scene": 2})
+
+    pipe.run()  # file 1: p1 done, p2 attempt 1 fails
+    with pytest.raises(VideoGenerationError):
+        pipe.run()  # file 1: p2 attempt 2 fails, the only scene tried
+    third = pipe.run()  # file 1 is given up on, so file 2 is next, not stuck behind it
+    assert {r["script_id"] for r in third} == {2}
+    rows = [r for r in db.tables["video_scenes"] if r["script_id"] == 1]
+    assert sorted((r["scene_index"], r["status"], r["attempts"]) for r in rows) == [(0, "done", 1), (1, "failed", 2)]
+
+    # raising the limit makes the given-up scene worth trying again
+    retry = VideoPipeline(db, FakeProvider(), {"max_attempts_per_scene": 3}).run()
+    assert [(r["script_id"], r["scene_index"], r["status"], r["attempts"]) for r in retry] == [(1, 1, "done", 3)]
+
+
+def test_video_pipeline_raises_when_every_scene_fails():
+    db = _db_with_scene_files(1, '[{"narration":"a","visual_prompt":"p","duration":3}]')
+    with pytest.raises(VideoGenerationError):
+        VideoPipeline(db, FakeProvider(fail_on={"p"})).run()
+    assert db.tables["video_scenes"][0]["status"] == "failed"
+
+
+def test_kling_signs_requests_and_returns_the_clip(monkeypatch):
+    import base64
+    import hashlib
+    import hmac
+
+    from avgen.video import kling
+
+    class Reply:
+        def __init__(self, data=None, content=b""):
+            self.data, self.content, self.status_code, self.text = data, content, 200, ""
+
+        def raise_for_status(self):
+            pass
+
+        def json(self):
+            return {"code": 0, "message": "SUCCEED", "data": self.data}
+
+    sent = {}
+
+    def fake_post(url, json, headers, timeout):
+        sent.update(url=url, body=json, auth=headers["Authorization"])
+        return Reply({"task_id": "t1", "task_status": "submitted"})
+
+    statuses = iter(["processing", "succeed"])
+
+    def fake_get(url, headers=None, timeout=None):
+        if url == "https://cdn/clip.mp4":
+            return Reply(content=b"mp4 bytes")
+        assert url.endswith("/v1/videos/text2video/t1")
+        return Reply({"task_status": next(statuses), "task_result": {"videos": [{"url": "https://cdn/clip.mp4"}]}})
+
+    monkeypatch.setattr(kling.requests, "post", fake_post)
+    monkeypatch.setattr(kling.requests, "get", fake_get)
+    provider = create_video_provider({"type": "kling", "access_key": "ak", "secret_key": "sk", "poll_seconds": 0})
+
+    assert provider.generate("a foggy town", 3) == b"mp4 bytes"
+    assert sent["body"]["duration"] == "5" and sent["body"]["prompt"] == "a foggy town"  # 3s -> nearest of 5/10
+
+    token = sent["auth"].removeprefix("Bearer ")
+    unsigned, signature = token.rsplit(".", 1)
+    expected = base64.urlsafe_b64encode(hmac.new(b"sk", unsigned.encode(), hashlib.sha256).digest()).rstrip(b"=")
+    assert signature == expected.decode()
+    claims = json.loads(base64.urlsafe_b64decode(unsigned.split(".")[1] + "=="))
+    assert claims["iss"] == "ak" and claims["exp"] > claims["nbf"]

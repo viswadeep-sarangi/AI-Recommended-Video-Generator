@@ -49,23 +49,18 @@
     "append_instructions": "Visual prompts must be self-contained and cinematic."
   },
   "video": {
-    "max_per_run": 20,
-    "default": ["sora", "kling"],
-    "by_category": {},
-    "providers": {
-      "sora": {"type": "sora", "api_key": "env:OPENAI_API_KEY", "model": "sora-2", "size": "720x1280"},
-      "kling": {
-        "type": "generic_http",
-        "submit_url": "https://YOUR-KLING-GATEWAY/v1/videos/text2video",
-        "status_url": "https://YOUR-KLING-GATEWAY/v1/videos/text2video/{id}",
-        "headers": {"Authorization": "env:KLING_AUTH_HEADER"},
-        "body_template": {"prompt": "{prompt}", "duration": "{duration}"},
-        "id_path": "data.task_id",
-        "status_path": "data.task_status",
-        "result_url_path": "data.task_result.videos.0.url",
-        "done_values": ["succeed"],
-        "failed_values": ["failed"]
-      }
+    "max_scene_files_per_run": 1,
+    "max_attempts_per_scene": 3,
+    "provider": {
+      "type": "kling",
+      "access_key": "env:KLING_ACCESS_KEY",
+      "secret_key": "env:KLING_SECRET_KEY",
+      "base_url": "https://api-singapore.klingai.com",
+      "model": "kling-v2-1-master",
+      "mode": "std",
+      "aspect_ratio": "9:16",
+      "clip_seconds": [5, 10],
+      "negative_prompt": "text, watermark, blurry, distorted faces"
     }
   },
   "audio": {

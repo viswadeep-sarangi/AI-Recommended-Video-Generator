@@ -36,6 +36,18 @@ create table if not exists avgen.video_scenes (
   id bigint generated always as identity primary key,
   script_id bigint, scene_file_id bigint references avgen.scene_files(id), scene_index int not null,
   status text not null, file_path text, provider text, error text, created_at timestamptz default now());
+-- One row per scene: retries update the row and count `attempts` (the video stage gives up after
+-- max_attempts_per_scene). Safe to re-run: older databases get the new columns, and any duplicate
+-- rows left by earlier versions are merged, keeping the "done" row (or else the newest) per scene.
+alter table avgen.video_scenes add column if not exists attempts int not null default 1;
+alter table avgen.video_scenes add column if not exists updated_at timestamptz default now();
+delete from avgen.video_scenes v using (
+  select id, row_number() over (partition by scene_file_id, scene_index
+                                order by (status = 'done') desc, id desc) as rank
+  from avgen.video_scenes) ranked
+where v.id = ranked.id and ranked.rank > 1;
+create unique index if not exists video_scenes_one_row_per_scene
+  on avgen.video_scenes (scene_file_id, scene_index);
 create table if not exists avgen.audio_files (
   id bigint generated always as identity primary key,
   script_id bigint references avgen.scripts(id), narration_path text, music_path text,
