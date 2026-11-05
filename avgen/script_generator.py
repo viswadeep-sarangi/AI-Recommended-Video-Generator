@@ -6,15 +6,21 @@ For each topic waiting to be scripted, it:
   3. records the script in the `scripts` table,
   4. marks the topic as "scripted" so it isn't picked again.
 """
+import logging
 from datetime import datetime, timezone
 
 from .llm import wrap_prompt
+
+log = logging.getLogger(__name__)
 
 # Defaults used when the "script" section of the config leaves a setting out.
 DEFAULT_TARGET_SECONDS = 30
 DEFAULT_WORDS_PER_SECOND = 2.5
 DEFAULT_MAX_PER_RUN = 3
 DEFAULT_FOLDER = "scripts"
+
+# Warn when a script's length is further than this from the target word count.
+WORD_COUNT_TOLERANCE = 0.3
 
 
 class ScriptGenerator:
@@ -27,20 +33,59 @@ class ScriptGenerator:
 
     def run_pending(self, limit=None):
         """Write scripts for the best-scoring topics that don't have one yet."""
-        topics = self._topics_waiting_for_a_script(limit or self.cfg.get("max_per_run", DEFAULT_MAX_PER_RUN))
-        return [self.generate(topic) for topic in topics]
+        how_many = limit or self.cfg.get("max_per_run", DEFAULT_MAX_PER_RUN)
+        log.info("settings: max_per_run=%s target_seconds=%s words_per_second=%s folder=%r",
+                 how_many, self.cfg.get("target_seconds", DEFAULT_TARGET_SECONDS),
+                 self.cfg.get("words_per_second", DEFAULT_WORDS_PER_SECOND),
+                 self.cfg.get("folder", DEFAULT_FOLDER))
+
+        topics = self._topics_waiting_for_a_script(how_many)
+        if not topics:
+            log.info("no topics with status 'new'; nothing to script")
+            return []
+        log.info("picked %d topic(s) to script:", len(topics))
+        for topic in topics:
+            log.info("  topic #%s (score %s): %s", topic["id"], topic.get("score"), topic["title"])
+
+        scripts = []
+        for number, topic in enumerate(topics, start=1):
+            log.info("[%d/%d] scripting topic #%s: %s", number, len(topics), topic["id"], topic["title"])
+            try:
+                scripts.append(self.generate(topic))
+            except Exception:
+                log.error("[%d/%d] failed on topic #%s; it stays 'new' and will be retried next run "
+                          "(%d script(s) saved before this)", number, len(topics), topic["id"], len(scripts))
+                raise
+        log.info("done: wrote %d script(s)", len(scripts))
+        return scripts
 
     def generate(self, topic, seconds=None):
         """Write, save and record a script for one topic."""
         seconds = seconds or self.cfg.get("target_seconds", DEFAULT_TARGET_SECONDS)
 
         prompt = self.build_prompt(topic, seconds)
+        log.debug("LLM prompt for topic #%s:\n%s", topic["id"], prompt)
         script_text = self.llm.complete(prompt).strip()
+        log.debug("LLM script for topic #%s:\n%s", topic["id"], script_text)
+        self._check_length(topic, script_text, seconds)
 
         file_path = self._save_script_file(topic, script_text)
+        log.info("  saved to the scripts bucket: %s", file_path)
         script_row = self._record_script(topic, file_path, seconds)
+        log.info("  recorded as script #%s", script_row.get("id"))
         self._mark_topic_scripted(topic)
+        log.info("  topic #%s marked 'scripted'", topic["id"])
         return script_row
+
+    def _check_length(self, topic, script_text, seconds):
+        """Log the script's length, warning if it's far from the target."""
+        words = len(script_text.split())
+        target = int(seconds * self.cfg.get("words_per_second", DEFAULT_WORDS_PER_SECOND))
+        log.info("  script: %d words (target ~%d), %d characters", words, target, len(script_text))
+        if target and abs(words - target) > target * WORD_COUNT_TOLERANCE:
+            log.warning("script for topic #%s is %d words, far from the ~%d target; "
+                        "its narration will run noticeably longer or shorter than %ss",
+                        topic["id"], words, target, seconds)
 
     # --- The prompt -------------------------------------------------------
 
