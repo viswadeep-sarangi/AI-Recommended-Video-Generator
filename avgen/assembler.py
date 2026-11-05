@@ -3,6 +3,8 @@ import subprocess
 import tempfile
 from pathlib import Path
 
+from .storage_paths import script_location
+
 
 def build_ffmpeg_cmd(list_file, narration, music, out, music_volume=0.15):
     cmd = ["ffmpeg", "-y", "-f", "concat", "-safe", "0", "-i", str(list_file), "-i", str(narration)]
@@ -41,7 +43,8 @@ class Assembler:
             out = tmp / "final.mp4"
             subprocess.run(build_ffmpeg_cmd(tmp / "list.txt", tmp / "n.mp3", music, out,
                                             self.cfg.get("music_volume", 0.15)), check=True, capture_output=True)
-            path = f"{self.cfg.get('folder', 'final')}/script_{script['id']}.mp4"
+            day, label = script_location(self.db, script)
+            path = f"{day}/{label}.mp4"  # e.g. 2026-11-05/script_7_the-town-that-vanished.mp4
             self.db.upload("final", path, out.read_bytes(), "video/mp4")
         return self.db.insert("final_videos", {"script_id": script["id"], "file_path": path})
 

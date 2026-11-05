@@ -2,6 +2,8 @@
 import json
 from datetime import datetime, timezone
 
+from .storage_paths import script_location
+
 
 class VideoPipeline:
     def __init__(self, db, generator, cfg=None):
@@ -16,13 +18,16 @@ class VideoPipeline:
                     yield sf, s
 
     def run(self, limit=None):
-        n, results = 0, []
+        n, results, folders = 0, [], {}
         for sf, scene in self.pending():
             if limit and n >= limit:
                 break
             n += 1
             category = self._category(sf)
-            path = f"{self.cfg.get('folder', 'video_scenes')}/script_{sf['script_id']}/scene_{scene['index']:03d}.mp4"
+            if sf["script_id"] not in folders:
+                folders[sf["script_id"]] = self._clip_folder(sf)
+            # e.g. 2026-11-05/script_7_the-town-that-vanished/scene_000.mp4
+            path = f"{folders[sf['script_id']]}/scene_{scene['index']:03d}.mp4"
             try:
                 provider, data = self.gen.generate(scene["visual_prompt"], scene["duration"], category)
                 self.db.upload("videos", path, data, "video/mp4")
@@ -33,6 +38,13 @@ class VideoPipeline:
                        created_at=datetime.now(timezone.utc).isoformat())
             results.append(self.db.insert("video_scenes", row))
         return results
+
+    def _clip_folder(self, sf):
+        """Folder for one script's clips, e.g. 2026-11-05/script_7_the-town-that-vanished."""
+        rows = self.db.select("scripts", {"id": f"eq.{sf['script_id']}"})
+        script = rows[0] if rows else {"id": sf["script_id"]}
+        day, label = script_location(self.db, script)
+        return f"{day}/{label}"
 
     def _category(self, sf):
         try:

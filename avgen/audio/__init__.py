@@ -2,6 +2,8 @@ import json
 
 import requests
 
+from ..storage_paths import script_location
+
 
 class OpenAITTS:
     def __init__(self, api_key, model="gpt-4o-mini-tts", voice="alloy", base_url="https://api.openai.com/v1", **_):
@@ -48,7 +50,8 @@ class AudioGenerator:
 
     def generate(self, script):
         text = self.db.download("scripts", script["file_path"]).decode("utf-8")
-        folder = f"{self.cfg.get('folder', 'audio')}/script_{script['id']}"
+        day, label = script_location(self.db, script)
+        folder = f"{day}/{label}"  # e.g. 2026-11-05/script_7_the-town-that-vanished
         row = {"script_id": script["id"], "narration_path": f"{folder}/narration.mp3", "music_path": None}
         self.db.upload("audio", row["narration_path"], self.voice.narrate(text), "audio/mpeg")
         if self.music:

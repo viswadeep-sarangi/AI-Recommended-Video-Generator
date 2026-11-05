@@ -61,6 +61,24 @@ def test_scout_wraps_and_stores(monkeypatch):
     assert llm.prompts[0].startswith("PRE") and llm.prompts[0].endswith("POST")
 
 
+def test_storage_title_snippet():
+    from avgen.storage_paths import title_snippet
+
+    assert title_snippet("The Town That Vanished Overnight!") == "the-town-that-vanished"
+    assert title_snippet("Café secrets: 5 facts") == "cafe-secrets-5-facts"
+    assert title_snippet("???") == "untitled"
+    assert len(title_snippet("x" * 100)) == 30
+
+
+def test_storage_script_location_uses_script_day_and_topic():
+    from avgen.storage_paths import script_location
+
+    db = FakeDB()
+    db.insert("topics", {"title": "The Town That Vanished Overnight"})
+    script = {"id": 7, "topic_id": 1, "created_at": "2026-11-05T07:00:01.123456+00:00"}
+    assert script_location(db, script) == ("2026-11-05", "script_7_the-town-that-vanished")
+
+
 def test_scout_stops_without_signals():
     llm = FakeLLM('[{"title": "T", "score": 5}]')
     db = FakeDB()

@@ -10,6 +10,7 @@ import logging
 from datetime import datetime, timezone
 
 from .llm import wrap_prompt
+from .storage_paths import day_folder, title_snippet
 
 log = logging.getLogger(__name__)
 
@@ -17,7 +18,6 @@ log = logging.getLogger(__name__)
 DEFAULT_TARGET_SECONDS = 30
 DEFAULT_WORDS_PER_SECOND = 2.5
 DEFAULT_MAX_PER_RUN = 3
-DEFAULT_FOLDER = "scripts"
 
 # Warn when a script's length is further than this from the target word count.
 WORD_COUNT_TOLERANCE = 0.3
@@ -34,10 +34,9 @@ class ScriptGenerator:
     def run_pending(self, limit=None):
         """Write scripts for the best-scoring topics that don't have one yet."""
         how_many = limit or self.cfg.get("max_per_run", DEFAULT_MAX_PER_RUN)
-        log.info("settings: max_per_run=%s target_seconds=%s words_per_second=%s folder=%r",
+        log.info("settings: max_per_run=%s target_seconds=%s words_per_second=%s",
                  how_many, self.cfg.get("target_seconds", DEFAULT_TARGET_SECONDS),
-                 self.cfg.get("words_per_second", DEFAULT_WORDS_PER_SECOND),
-                 self.cfg.get("folder", DEFAULT_FOLDER))
+                 self.cfg.get("words_per_second", DEFAULT_WORDS_PER_SECOND))
 
         topics = self._topics_waiting_for_a_script(how_many)
         if not topics:
@@ -115,16 +114,15 @@ class ScriptGenerator:
     def _save_script_file(self, topic, script_text):
         """Upload the script text to storage; returns where it was saved.
 
-        Scripts are grouped into one folder per day (UTC), e.g.
-            scripts/2026-11-05/topic_42_20261105T070000Z.txt
-        Storage folders are just part of the path, so each day's folder
-        appears automatically with its first upload.
+        Scripts are grouped into one folder per day (UTC) inside the
+        `scripts` bucket, named after the topic, e.g.
+            2026-11-05/topic_42_the-town-that-vanished_070000Z.txt
+        The time (UTC) keeps two runs on the same day from overwriting each
+        other. See storage_paths.py for how the other stages name files.
         """
         now = datetime.now(timezone.utc)
-        day_folder = now.strftime("%Y-%m-%d")
-        timestamp = now.strftime("%Y%m%dT%H%M%SZ")
-        folder = self.cfg.get("folder", DEFAULT_FOLDER)
-        file_path = f"{folder}/{day_folder}/topic_{topic['id']}_{timestamp}.txt"
+        file_name = f"topic_{topic['id']}_{title_snippet(topic['title'])}_{now.strftime('%H%M%SZ')}.txt"
+        file_path = f"{day_folder(now)}/{file_name}"
         self.db.upload("scripts", file_path, script_text, "text/plain")
         return file_path
 

@@ -2,6 +2,7 @@
 import json
 
 from .llm import extract_json, wrap_prompt
+from .storage_paths import script_location
 
 
 def normalize_scenes(scenes, min_s=2.0, max_s=5.0):
@@ -30,7 +31,8 @@ class SceneGenerator:
     def generate(self, script):
         text = self.db.download("scripts", script["file_path"]).decode("utf-8")
         scenes = normalize_scenes(extract_json(self.llm.complete(self.build_prompt(text))), self.min_s, self.max_s)
-        path = f"{self.cfg.get('folder', 'scenes')}/script_{script['id']}.json"
+        day, label = script_location(self.db, script)
+        path = f"{day}/{label}.json"  # e.g. 2026-11-05/script_7_the-town-that-vanished.json
         self.db.upload("scenes", path, json.dumps({"script_id": script["id"], "scenes": scenes}, indent=2), "application/json")
         return self.db.insert("scene_files", {"script_id": script["id"], "file_path": path, "scene_count": len(scenes)})
 
