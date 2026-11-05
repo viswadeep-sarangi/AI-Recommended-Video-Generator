@@ -70,11 +70,16 @@ class ScriptGenerator:
     def _save_script_file(self, topic, script_text):
         """Upload the script text to storage; returns where it was saved.
 
-        Example path: scripts/topic_42_20261104T090000Z.txt
+        Scripts are grouped into one folder per day (UTC), e.g.
+            scripts/2026-11-05/topic_42_20261105T070000Z.txt
+        Storage folders are just part of the path, so each day's folder
+        appears automatically with its first upload.
         """
-        timestamp = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%SZ")
+        now = datetime.now(timezone.utc)
+        day_folder = now.strftime("%Y-%m-%d")
+        timestamp = now.strftime("%Y%m%dT%H%M%SZ")
         folder = self.cfg.get("folder", DEFAULT_FOLDER)
-        file_path = f"{folder}/topic_{topic['id']}_{timestamp}.txt"
+        file_path = f"{folder}/{day_folder}/topic_{topic['id']}_{timestamp}.txt"
         self.db.upload("scripts", file_path, script_text, "text/plain")
         return file_path
 

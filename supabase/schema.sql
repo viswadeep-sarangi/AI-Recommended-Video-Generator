@@ -54,4 +54,13 @@ alter default privileges in schema avgen
 alter default privileges in schema avgen
   grant all on sequences to service_role;
 
--- Create storage buckets: scripts, scenes, video-scenes, audio, final-videos
+-- Storage buckets for the files each stage produces (names match "buckets" in the config).
+-- Private: only requests with a privileged key (the pipeline's service key) can read or write.
+-- Safe to re-run: existing buckets are left untouched.
+insert into storage.buckets (id, name, public) values
+  ('scripts', 'scripts', false),
+  ('scenes', 'scenes', false),
+  ('video-scenes', 'video-scenes', false),
+  ('audio', 'audio', false),
+  ('final-videos', 'final-videos', false)
+on conflict (id) do nothing;
