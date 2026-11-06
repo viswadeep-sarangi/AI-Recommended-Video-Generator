@@ -52,15 +52,16 @@
     "max_scene_files_per_run": 1,
     "max_attempts_per_scene": 3,
     "provider": {
-      "type": "kling",
-      "access_key": "env:KLING_ACCESS_KEY",
-      "secret_key": "env:KLING_SECRET_KEY",
-      "base_url": "https://api-singapore.klingai.com",
-      "model": "kling-v2-1-master",
-      "mode": "std",
-      "aspect_ratio": "9:16",
-      "clip_seconds": [5, 10],
-      "negative_prompt": "text, watermark, blurry, distorted faces"
+      "type": "seedance",
+      "api_key": "env:ARK_API_KEY",
+      "model": "seedance-1-0-pro-fast-251015",
+      "base_url": "https://ark.ap-southeast.bytepluses.com/api/v3",
+      "resolution": "480p",
+      "ratio": "9:16",
+      "min_seconds": 2,
+      "max_seconds": 12,
+      "camera_fixed": false,
+      "usd_per_million_tokens": 1.0
     }
   },
   "audio": {

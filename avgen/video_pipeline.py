@@ -1,11 +1,11 @@
-"""Video stage: turns each scene into a short video clip with Kling AI.
+"""Video stage: turns each scene into a short video clip with Seedance.
 
 The scene generator saves every script as a "scene file": a list of scenes,
 each with a description of what to show (`visual_prompt`) and how long it
 lasts. This stage picks the oldest scene files that still have scenes without
 a clip (at most `max_scene_files_per_run` per run, 1 by default) and, for each
 of those scenes:
-  1. asks Kling AI for a clip of the scene's description,
+  1. asks Seedance for a clip of the scene's description,
   2. saves the clip in the `videos` bucket, in a folder named after the
      script, e.g.
          2026-11-05/script_7_the-town-that-vanished/scene_000.mp4
@@ -60,7 +60,7 @@ class VideoGenerationError(RuntimeError):
 class VideoPipeline:
     def __init__(self, db, provider, cfg=None):
         self.db = db              # Supabase: tables and file storage
-        self.provider = provider  # the video service that makes the clips (Kling)
+        self.provider = provider  # the video service that makes the clips (Seedance)
         self.cfg = cfg or {}      # the "video" section of the config
 
         self.max_attempts = self.cfg.get("max_attempts_per_scene", DEFAULT_MAX_ATTEMPTS_PER_SCENE)

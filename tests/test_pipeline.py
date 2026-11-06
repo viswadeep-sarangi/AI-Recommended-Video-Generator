@@ -316,47 +316,62 @@ def test_video_pipeline_raises_when_every_scene_fails():
     assert db.tables["video_scenes"][0]["status"] == "failed"
 
 
-def test_kling_signs_requests_and_returns_the_clip(monkeypatch):
-    import base64
-    import hashlib
-    import hmac
+class FakeReply:
+    def __init__(self, data=None, content=b""):
+        self.data, self.content, self.status_code, self.text = data, content, 200, ""
 
-    from avgen.video import kling
+    def raise_for_status(self):
+        pass
 
-    class Reply:
-        def __init__(self, data=None, content=b""):
-            self.data, self.content, self.status_code, self.text = data, content, 200, ""
+    def json(self):
+        return self.data
 
-        def raise_for_status(self):
-            pass
 
-        def json(self):
-            return {"code": 0, "message": "SUCCEED", "data": self.data}
+def _fake_seedance(monkeypatch, statuses, final=None):
+    """Point the Seedance provider at fake HTTP calls; returns what was sent."""
+    from avgen.video import seedance
 
     sent = {}
+    statuses = iter(statuses)
 
     def fake_post(url, json, headers, timeout):
         sent.update(url=url, body=json, auth=headers["Authorization"])
-        return Reply({"task_id": "t1", "task_status": "submitted"})
-
-    statuses = iter(["processing", "succeed"])
+        return FakeReply({"id": "cgt-1"})
 
     def fake_get(url, headers=None, timeout=None):
         if url == "https://cdn/clip.mp4":
-            return Reply(content=b"mp4 bytes")
-        assert url.endswith("/v1/videos/text2video/t1")
-        return Reply({"task_status": next(statuses), "task_result": {"videos": [{"url": "https://cdn/clip.mp4"}]}})
+            return FakeReply(content=b"mp4 bytes")
+        assert url.endswith("/contents/generations/tasks/cgt-1")
+        status = next(statuses)
+        job = {"id": "cgt-1", "status": status}
+        if status == "succeeded":
+            job.update(content={"video_url": "https://cdn/clip.mp4"}, usage={"total_tokens": 49005})
+        if status == "failed":
+            job.update(final or {})
+        return FakeReply(job)
 
-    monkeypatch.setattr(kling.requests, "post", fake_post)
-    monkeypatch.setattr(kling.requests, "get", fake_get)
-    provider = create_video_provider({"type": "kling", "access_key": "ak", "secret_key": "sk", "poll_seconds": 0})
+    monkeypatch.setattr(seedance.requests, "post", fake_post)
+    monkeypatch.setattr(seedance.requests, "get", fake_get)
+    return sent
 
-    assert provider.generate("a foggy town", 3) == b"mp4 bytes"
-    assert sent["body"]["duration"] == "5" and sent["body"]["prompt"] == "a foggy town"  # 3s -> nearest of 5/10
 
-    token = sent["auth"].removeprefix("Bearer ")
-    unsigned, signature = token.rsplit(".", 1)
-    expected = base64.urlsafe_b64encode(hmac.new(b"sk", unsigned.encode(), hashlib.sha256).digest()).rstrip(b"=")
-    assert signature == expected.decode()
-    claims = json.loads(base64.urlsafe_b64decode(unsigned.split(".")[1] + "=="))
-    assert claims["iss"] == "ak" and claims["exp"] > claims["nbf"]
+def test_seedance_sends_text_only_request_and_returns_the_clip(monkeypatch):
+    sent = _fake_seedance(monkeypatch, ["queued", "running", "succeeded"])
+    provider = create_video_provider({"type": "seedance", "api_key": "key", "poll_seconds": 0,
+                                      "usd_per_million_tokens": 1.0})
+
+    assert provider.name == "seedance"
+    assert provider.generate("a foggy town", 3.5) == b"mp4 bytes"
+    assert sent["auth"] == "Bearer key"
+    assert sent["body"]["model"] == "seedance-1-0-pro-fast-251015"
+    assert sent["body"]["content"] == [{"type": "text", "text": "a foggy town --ratio 9:16 --resolution 480p "
+                                                                 "--duration 4 --camerafixed false"}]  # 3.5s -> 4s
+
+
+def test_seedance_keeps_clip_length_within_limits_and_reports_failures(monkeypatch):
+    sent = _fake_seedance(monkeypatch, ["failed"], {"error": {"code": "SensitiveContent", "message": "rejected"}})
+    provider = create_video_provider({"type": "seedance", "api_key": "key", "poll_seconds": 0, "min_seconds": 4})
+
+    with pytest.raises(RuntimeError, match="SensitiveContent rejected"):
+        provider.generate("a foggy town", 2)
+    assert "--duration 4 " in sent["body"]["content"][0]["text"]  # 2s raised to min_seconds

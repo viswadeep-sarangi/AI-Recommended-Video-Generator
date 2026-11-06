@@ -5,14 +5,14 @@ on:
   workflow_dispatch:
     inputs:
       log_level:
-        description: "Log level (DEBUG also prints full visual prompts and Kling requests)"
+        description: "Log level (DEBUG also prints full visual prompts and Seedance requests)"
         type: choice
         options: [DEBUG, INFO]
         default: DEBUG
 jobs:
   videos:
     runs-on: ubuntu-latest
-    # Each Kling clip can take several minutes and a run makes every clip of one
+    # A Seedance clip usually takes under a minute, but a run makes every clip of one
     # script (max_scene_files_per_run), so allow plenty of time.
     timeout-minutes: 180
     steps:
@@ -27,5 +27,4 @@ jobs:
           AVGEN_LOG_LEVEL: ${{ inputs.log_level || 'DEBUG' }}
           SUPABASE_URL: ${{ secrets.SUPABASE_URL }}
           SUPABASE_SERVICE_KEY: ${{ secrets.SUPABASE_SERVICE_KEY }}
-          KLING_ACCESS_KEY: ${{ secrets.KLING_ACCESS_KEY }}
-          KLING_SECRET_KEY: ${{ secrets.KLING_SECRET_KEY }}
+          ARK_API_KEY: ${{ secrets.ARK_API_KEY }}
