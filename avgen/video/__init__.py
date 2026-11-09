@@ -8,7 +8,7 @@ Only Seedance (ByteDance, through BytePlus ModelArk) is set up for now. The
 To add another service later, write a VideoProvider subclass and register it
 with register_video_provider("name", TheClass).
 """
-from .base import VideoProvider
+from .base import Clip, VideoProvider
 from .seedance import SeedanceProvider
 
 PROVIDERS = {"seedance": SeedanceProvider}

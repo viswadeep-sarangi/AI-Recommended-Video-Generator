@@ -22,7 +22,7 @@ import time
 import requests
 
 from ..log import check_response
-from .base import VideoProvider
+from .base import Clip, VideoProvider
 
 log = logging.getLogger(__name__)
 
@@ -48,23 +48,35 @@ class SeedanceProvider(VideoProvider):
         self.min_seconds = min_seconds  # the shortest and longest clip the model accepts
         self.max_seconds = max_seconds
         self.camera_fixed = camera_fixed  # True keeps the camera still
-        self.usd_per_million_tokens = usd_per_million_tokens  # only used to log what each clip cost
+        self.usd_per_million_tokens = usd_per_million_tokens  # price, used to estimate each clip's cost
         self.poll_seconds = poll_seconds
         self.timeout_seconds = timeout_seconds
 
     def generate(self, prompt, duration):
-        """Make a clip for `prompt` and return its mp4 bytes.
+        """Make a clip for `prompt`; returns it as a Clip with its details.
 
         Seedance makes clips of whole seconds, so `duration` is rounded up
         (e.g. 3.5s -> 4s) and kept between min_seconds and max_seconds.
         """
         seconds = min(max(math.ceil(duration), self.min_seconds), self.max_seconds)
         task_id = self._start_job(prompt, seconds)
-        video_url = self._wait_for_job(task_id)
+        job = self._wait_for_job(task_id)
         log.info("    downloading the finished clip")
-        response = requests.get(video_url, timeout=600)
+        response = requests.get(job["content"]["video_url"], timeout=600)
         check_response(response, "download of the Seedance clip")
-        return response.content
+
+        tokens = (job.get("usage") or {}).get("total_tokens")
+        return Clip(
+            video=response.content,
+            job_id=task_id,
+            model=job.get("model", self.model),
+            resolution=job.get("resolution", self.resolution),
+            ratio=job.get("ratio", self.ratio),
+            seconds=job.get("duration", seconds),
+            tokens=tokens,
+            cost_usd=self._cost(tokens),
+            details=job,
+        )
 
     # --- The three steps ---------------------------------------------------
 
@@ -82,7 +94,7 @@ class SeedanceProvider(VideoProvider):
         return task_id
 
     def _wait_for_job(self, task_id):
-        """Wait until the job finishes; returns the finished clip's URL."""
+        """Wait until the job finishes; returns Seedance's reply for the finished job."""
         started = time.monotonic()
         last_status = None
         while time.monotonic() - started < self.timeout_seconds:
@@ -95,8 +107,7 @@ class SeedanceProvider(VideoProvider):
                 log.info("    Seedance job %s: %s (after %.0fs)", task_id, status, time.monotonic() - started)
                 last_status = status
             if status == STATUS_DONE:
-                self._log_usage(job)
-                return job["content"]["video_url"]
+                return job
             if status in STATUS_GAVE_UP:
                 error = job.get("error") or {}
                 raise RuntimeError(f"Seedance job {task_id} {status}: "
@@ -110,12 +121,12 @@ class SeedanceProvider(VideoProvider):
     def _headers(self):
         return {"Authorization": f"Bearer {self.api_key}", "Content-Type": "application/json"}
 
-    def _log_usage(self, job):
-        """e.g. "used 49005 tokens (~$0.049)"."""
-        tokens = (job.get("usage") or {}).get("total_tokens")
-        if tokens is None:
-            return
-        cost = ""
-        if self.usd_per_million_tokens:
-            cost = f" (~${tokens / 1_000_000 * self.usd_per_million_tokens:.3f})"
-        log.info("    used %s tokens%s", tokens, cost)
+    def _cost(self, tokens):
+        """Estimated cost in USD from the configured price, e.g. 49005 tokens -> 0.049005.
+
+        None if the token count or the price is unknown. The real charge is
+        on the BytePlus console's Usage and Billing pages.
+        """
+        if tokens is None or not self.usd_per_million_tokens:
+            return None
+        return round(tokens / 1_000_000 * self.usd_per_million_tokens, 6)

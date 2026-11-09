@@ -7,7 +7,8 @@ from avgen.llm import LLM, extract_json, wrap_prompt
 from avgen.scene_generator import (InvalidSceneReply, SceneGenerationError, SceneGenerator, normalize_scenes,
                                    parse_scene_reply)
 from avgen.scout import SOURCES, RecommendationFinder, fetch_youtube
-from avgen.video import create_video_provider
+from avgen.storage_paths import day_folder
+from avgen.video import Clip, create_video_provider
 from avgen.video_pipeline import VideoGenerationError, VideoPipeline
 
 
@@ -272,7 +273,7 @@ class FakeProvider:
         if prompt in self.fail_on and (self.times is None or self.failures.get(prompt, 0) < self.times):
             self.failures[prompt] = self.failures.get(prompt, 0) + 1
             raise RuntimeError("busy")
-        return b"mp4"
+        return Clip(b"mp4", model="m", resolution="480p", ratio="9:16", seconds=5, tokens=49005, cost_usd=0.049)
 
 
 def test_video_pipeline_does_one_scene_file_per_run_and_retries_on_the_same_row():
@@ -282,6 +283,9 @@ def test_video_pipeline_does_one_scene_file_per_run_and_retries_on_the_same_row(
     first = pipe.run()  # only the first scene file; scene p2 fails
     assert [(r["script_id"], r["status"], r["attempts"]) for r in first] == [(1, "done", 1), (1, "failed", 1)]
     assert first[0]["provider"] == "fake" and first[0]["file_path"].endswith("/scene_000.mp4")
+    made = first[0]
+    assert (made["resolution"], made["ratio"], made["tokens"], made["cost_usd"]) == ("480p", "9:16", 49005, 0.049)
+    assert first[1].get("cost_usd") is None  # a failed attempt has no clip details
 
     second = pipe.run()  # still the first file: only the failed scene is retried
     assert [(r["script_id"], r["scene_index"], r["status"], r["attempts"]) for r in second] == [(1, 1, "done", 2)]
@@ -290,6 +294,20 @@ def test_video_pipeline_does_one_scene_file_per_run_and_retries_on_the_same_row(
     third = pipe.run()  # now the second file
     assert [(r["script_id"], r["status"]) for r in third] == [(2, "done"), (2, "done")]
     assert VideoPipeline(db, FakeProvider(), {"max_scene_files_per_run": 5}).run() == []
+
+
+def test_video_pipeline_dates_clip_folders_by_first_clip_not_by_script():
+    db = _db_with_scene_files(1)
+    db.tables["scripts"][0]["created_at"] = "2026-01-01T07:00:00Z"  # written long before its clips
+    pipe = VideoPipeline(db, FakeProvider(fail_on={"p2"}, times=1))
+
+    first = pipe.run()  # p1 done today, p2 fails
+    assert first[0]["file_path"].startswith(day_folder() + "/script_1_")
+
+    # pretend the first clip was made on an earlier day: the retry joins it there
+    db.tables["video_scenes"][0]["file_path"] = "2025-12-31/script_1_x/scene_000.mp4"
+    retry = pipe.run()
+    assert retry[0]["file_path"] == "2025-12-31/script_1_x/scene_001.mp4"
 
 
 def test_video_pipeline_gives_up_on_a_scene_after_max_attempts():
@@ -345,7 +363,8 @@ def _fake_seedance(monkeypatch, statuses, final=None):
         status = next(statuses)
         job = {"id": "cgt-1", "status": status}
         if status == "succeeded":
-            job.update(content={"video_url": "https://cdn/clip.mp4"}, usage={"total_tokens": 49005})
+            job.update(content={"video_url": "https://cdn/clip.mp4"}, usage={"total_tokens": 49005},
+                       model="seedance-1-0-pro-fast-251015", resolution="480p", ratio="9:16", duration=4)
         if status == "failed":
             job.update(final or {})
         return FakeReply(job)
@@ -361,7 +380,10 @@ def test_seedance_sends_text_only_request_and_returns_the_clip(monkeypatch):
                                       "usd_per_million_tokens": 1.0})
 
     assert provider.name == "seedance"
-    assert provider.generate("a foggy town", 3.5) == b"mp4 bytes"
+    clip = provider.generate("a foggy town", 3.5)
+    assert clip.video == b"mp4 bytes" and clip.job_id == "cgt-1"
+    assert (clip.resolution, clip.ratio, clip.seconds) == ("480p", "9:16", 4)
+    assert (clip.tokens, clip.cost_usd) == (49005, 0.049005)  # at $1 per million tokens
     assert sent["auth"] == "Bearer key"
     assert sent["body"]["model"] == "seedance-1-0-pro-fast-251015"
     assert sent["body"]["content"] == [{"type": "text", "text": "a foggy town --ratio 9:16 --resolution 480p "

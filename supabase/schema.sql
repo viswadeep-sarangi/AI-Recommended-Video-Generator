@@ -48,6 +48,16 @@ delete from avgen.video_scenes v using (
 where v.id = ranked.id and ranked.rank > 1;
 create unique index if not exists video_scenes_one_row_per_scene
   on avgen.video_scenes (scene_file_id, scene_index);
+-- How each clip was made, filled in when it succeeds. cost_usd is an estimate from the price in
+-- the config; the real charge is on the provider's billing page. `details` is the provider's full reply.
+alter table avgen.video_scenes add column if not exists job_id text;
+alter table avgen.video_scenes add column if not exists model text;
+alter table avgen.video_scenes add column if not exists resolution text;
+alter table avgen.video_scenes add column if not exists ratio text;
+alter table avgen.video_scenes add column if not exists clip_seconds numeric;
+alter table avgen.video_scenes add column if not exists tokens bigint;
+alter table avgen.video_scenes add column if not exists cost_usd numeric(12, 6);
+alter table avgen.video_scenes add column if not exists details jsonb;
 create table if not exists avgen.audio_files (
   id bigint generated always as identity primary key,
   script_id bigint references avgen.scripts(id), narration_path text, music_path text,

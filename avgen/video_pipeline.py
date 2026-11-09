@@ -7,10 +7,11 @@ a clip (at most `max_scene_files_per_run` per run, 1 by default) and, for each
 of those scenes:
   1. asks Seedance for a clip of the scene's description,
   2. saves the clip in the `videos` bucket, in a folder named after the
-     script, e.g.
-         2026-11-05/script_7_the-town-that-vanished/scene_000.mp4
-  3. records it in the `video_scenes` table: "done", or "failed" with the
-     error.
+     script and dated the day its first clip was made, e.g.
+         2026-11-09/script_7_the-town-that-vanished/scene_000.mp4
+  3. records it in the `video_scenes` table: "done" with how the clip was
+     made (model, resolution, aspect ratio, length, tokens, estimated
+     cost in USD and the provider's full reply), or "failed" with the error.
 
 Each scene has exactly one row in `video_scenes`, which counts its
 `attempts`. A failed scene is tried again on the next run, up to
@@ -33,7 +34,7 @@ import logging
 import time
 from datetime import datetime, timezone
 
-from .storage_paths import script_location
+from .storage_paths import day_folder, script_location
 
 log = logging.getLogger(__name__)
 
@@ -113,11 +114,11 @@ class VideoPipeline:
     def generate_clips(self, scene_file):
         """Make, save and record a clip for every scene in this file still worth trying."""
         script = self._script_for(scene_file)
-        folder = self._clip_folder(script)
+        rows = self._rows_by_scene(scene_file)  # scene index -> its `video_scenes` row, if any
+        folder = self._clip_folder(script, rows)
         log.info("  clips go in: %s/", folder)
 
         scenes = self._download_scenes(scene_file)
-        rows = self._rows_by_scene(scene_file)  # scene index -> its `video_scenes` row, if any
         to_try = [scene for scene in scenes if self._worth_trying(rows.get(scene["index"]))]
         done = sum(1 for row in rows.values() if row["status"] == "done")
         log.info("  %d scene(s) in the file: %d done, %d given up, %d to try now",
@@ -147,11 +148,13 @@ class VideoPipeline:
 
         started = time.monotonic()
         try:
-            video = self.provider.generate(scene["visual_prompt"], scene["duration"])
-            log.info("    clip made in %.1fs (%s)", time.monotonic() - started, _size(len(video)))
-            self.db.upload("videos", file_path, video, "video/mp4")
+            clip = self.provider.generate(scene["visual_prompt"], scene["duration"])
+            log.info("    clip made in %.1fs: %s, %s %s, %ss, %s tokens, %s", time.monotonic() - started,
+                     _size(len(clip.video)), clip.resolution, clip.ratio, clip.seconds, clip.tokens,
+                     _dollars(clip.cost_usd))
+            self.db.upload("videos", file_path, clip.video, "video/mp4")
             log.info("    saved to the videos bucket: %s", file_path)
-            result = {"status": "done", "file_path": file_path, "error": None}
+            result = {"status": "done", "file_path": file_path, "error": None, **_clip_details(clip)}
         except Exception as error:
             if attempt < self.max_attempts:
                 next_step = "the next run will try it again"
@@ -174,9 +177,12 @@ class VideoPipeline:
     def _log_summary(self, rows):
         done = [row for row in rows if row["status"] == "done"]
         failed = [row for row in rows if row["status"] == "failed"]
-        log.info("done: made %d of %d clip(s), %d failed", len(done), len(rows), len(failed))
+        costs = [row["cost_usd"] for row in done if row.get("cost_usd") is not None]
+        log.info("done: made %d of %d clip(s), %d failed; estimated cost this run: %s", len(done), len(rows),
+                 len(failed), _dollars(sum(costs)) if costs else "unknown")
         for row in done:
-            log.info("  ok     script #%s scene %s -> %s", row["script_id"], row["scene_index"], row["file_path"])
+            log.info("  ok     script #%s scene %s -> %s (%s)", row["script_id"], row["scene_index"],
+                     row["file_path"], _dollars(row.get("cost_usd")))
         for row in failed:
             log.error("  FAILED script #%s scene %s (attempt %s/%s): %s", row["script_id"], row["scene_index"],
                       row["attempts"], self.max_attempts, row.get("error"))
@@ -247,13 +253,24 @@ class VideoPipeline:
             log.warning("script #%s not found; naming its clip folder without a title", scene_file["script_id"])
         return rows[0] if rows else {"id": scene_file["script_id"]}
 
-    def _clip_folder(self, script):
-        """Folder for one script's clips, e.g. 2026-11-05/script_7_the-town-that-vanished.
+    def _clip_folder(self, script, rows):
+        """Folder for one script's clips, e.g. 2026-11-09/script_7_the-town-that-vanished.
 
+        The date is the day the script's first clip was made (UTC), not the
+        day the script was written: with a backlog, a script written on
+        Nov 5 may only get its clips on Nov 9, and they belong in the Nov 9
+        folder. Once a script has a clip, later clips for it (such as
+        retries on another day) go in that same folder, so one script's
+        clips are never split across days.
+
+        `rows` is the script's existing `video_scenes` rows, by scene index.
         See storage_paths.py for how the other stages name files.
         """
-        day, label = script_location(self.db, script)
-        return f"{day}/{label}"
+        for row in rows.values():
+            if row.get("file_path"):
+                return row["file_path"].rsplit("/", 1)[0]
+        _, label = script_location(self.db, script)
+        return f"{day_folder()}/{label}"
 
 
 # --- Small helpers -----------------------------------------------------------
@@ -262,6 +279,25 @@ def _preview(text, limit=PREVIEW_CHARS):
     """The start of `text` on one line, for log messages."""
     one_line = " ".join(str(text or "").split())
     return one_line if len(one_line) <= limit else one_line[:limit - 3] + "..."
+
+
+def _clip_details(clip):
+    """The `video_scenes` columns that describe how a clip was made."""
+    return {
+        "job_id": clip.job_id,
+        "model": clip.model,
+        "resolution": clip.resolution,
+        "ratio": clip.ratio,
+        "clip_seconds": clip.seconds,
+        "tokens": clip.tokens,
+        "cost_usd": clip.cost_usd,
+        "details": clip.details,
+    }
+
+
+def _dollars(amount):
+    """e.g. 0.049005 -> "~$0.049"; "cost unknown" if None."""
+    return "cost unknown" if amount is None else f"~${amount:.3f}"
 
 
 def _size(n_bytes):
