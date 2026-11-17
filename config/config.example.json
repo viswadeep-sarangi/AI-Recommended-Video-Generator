@@ -65,7 +65,17 @@
     }
   },
   "audio": {
-    "voice": {"provider": "openai_tts", "api_key": "env:OPENAI_API_KEY", "voice": "alloy"},
+    "max_scripts_per_run": 10,
+    "max_attempts_per_script": 3,
+    "wait_for_clips": true,
+    "voice": {
+      "provider": "openai_tts",
+      "api_key": "env:OPENAI_API_KEY",
+      "model": "gpt-4o-mini-tts",
+      "voice": "alloy",
+      "instructions": "Energetic, curious storyteller. Clear and well paced.",
+      "usd_per_minute": 0.015
+    },
     "music": {"provider": "none"}
   },
   "assemble": {"music_volume": 0.15}

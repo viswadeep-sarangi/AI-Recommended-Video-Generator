@@ -23,7 +23,7 @@ class Assembler:
     def assemble(self, script):
         clips = sorted((r for r in self.db.select("video_scenes", {"script_id": f"eq.{script['id']}", "status": "eq.done"})),
                        key=lambda r: r["scene_index"])
-        audio = self.db.select("audio_files", {"script_id": f"eq.{script['id']}"})
+        audio = self.db.select("audio_files", {"script_id": f"eq.{script['id']}", "status": "eq.done"})
         if not clips or not audio:
             return None
         audio = audio[0]

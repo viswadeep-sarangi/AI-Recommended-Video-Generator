@@ -1,0 +1,29 @@
+name: Daily audio
+on:
+  schedule:
+    - cron: "0 12 * * *"  # three hours after the daily videos (09:00 UTC), so the day's clips are usually done
+  workflow_dispatch:
+    inputs:
+      log_level:
+        description: "Log level (DEBUG also prints the full script and the TTS request settings)"
+        type: choice
+        options: [DEBUG, INFO]
+        default: DEBUG
+jobs:
+  audio:
+    runs-on: ubuntu-latest
+    # A narration takes a few seconds; max_scripts_per_run of them fit easily.
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with: {python-version: "3.12"}
+      - run: pip install -r requirements.txt
+      - run: cp config/config.example.json config/config.json
+      - run: python -m avgen audio
+        env:
+          PYTHONUNBUFFERED: "1"
+          AVGEN_LOG_LEVEL: ${{ inputs.log_level || 'DEBUG' }}
+          SUPABASE_URL: ${{ secrets.SUPABASE_URL }}
+          SUPABASE_SERVICE_KEY: ${{ secrets.SUPABASE_SERVICE_KEY }}
+          OPENAI_API_KEY: ${{ secrets.OPENAI_API_KEY }}

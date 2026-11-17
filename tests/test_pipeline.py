@@ -2,6 +2,8 @@ import json
 
 import pytest
 
+from avgen.audio import Narration, create_voice
+from avgen.audio_generator import AudioGenerationError, AudioGenerator
 from avgen.config import _resolve
 from avgen.llm import LLM, extract_json, wrap_prompt
 from avgen.scene_generator import (InvalidSceneReply, SceneGenerationError, SceneGenerator, normalize_scenes,
@@ -397,3 +399,82 @@ def test_seedance_keeps_clip_length_within_limits_and_reports_failures(monkeypat
     with pytest.raises(RuntimeError, match="SensitiveContent rejected"):
         provider.generate("a foggy town", 2)
     assert "--duration 4 " in sent["body"]["content"][0]["text"]  # 2s raised to min_seconds
+
+
+class FakeVoice:
+    """Narrates, except texts in `fail_on` (each failing `times` times, forever if None)."""
+    name = "fake_voice"
+
+    def __init__(self, fail_on=(), times=None):
+        self.fail_on, self.times, self.failures, self.texts = set(fail_on), times, {}, []
+
+    def narrate(self, text):
+        self.texts.append(text)
+        if text in self.fail_on and (self.times is None or self.failures.get(text, 0) < self.times):
+            self.failures[text] = self.failures.get(text, 0) + 1
+            raise RuntimeError("tts busy")
+        return Narration(b"mp3", model="m", voice="alloy", characters=len(text), seconds=30, cost_usd=0.0075)
+
+
+def _db_with_narration_ready(count, clips_done=True):
+    """`count` scripts (texts "t0", "t1", ...) whose single scene has a clip (or not)."""
+    db = FakeDB()
+    for number in range(count):
+        script = db.insert("scripts", {"topic_id": 1, "file_path": f"s{number}.txt", "created_at": "2026-01-01T07:00:00Z"})
+        db.upload("scripts", f"s{number}.txt", f"t{number}".encode())
+        scene_file = db.insert("scene_files", {"script_id": script["id"], "file_path": "x.json", "scene_count": 1})
+        if clips_done:
+            db.insert("video_scenes", {"script_id": script["id"], "scene_file_id": scene_file["id"],
+                                       "scene_index": 0, "status": "done"})
+    return db
+
+
+def test_audio_generator_keeps_going_after_a_failure_and_retries_on_the_same_row():
+    db = _db_with_narration_ready(3)
+    pipe = AudioGenerator(db, FakeVoice(fail_on={"t0"}, times=1), cfg={"max_scripts_per_run": 2})
+
+    first = pipe.run()  # script 1 fails, script 2 still gets narrated; script 3 waits (limit 2)
+    assert [(r["script_id"], r["status"], r["attempts"]) for r in first] == [(1, "failed", 1), (2, "done", 1)]
+    done = first[1]
+    assert done["narration_path"] == f"{day_folder()}/script_2_untitled/narration.mp3"  # dated today, not by the script
+    assert (done["provider"], done["voice"], done["characters"], done["cost_usd"]) == ("fake_voice", "alloy", 2, 0.0075)
+
+    second = pipe.run()  # the failed script is retried on its own row, then script 3
+    assert [(r["script_id"], r["status"], r["attempts"]) for r in second] == [(1, "done", 2), (3, "done", 1)]
+    assert len(db.tables["audio_files"]) == 3
+    assert pipe.run() == []
+
+
+def test_audio_generator_waits_for_clips_unless_told_not_to():
+    db = _db_with_narration_ready(1, clips_done=False)
+    assert AudioGenerator(db, FakeVoice()).run() == []
+    assert [r["status"] for r in AudioGenerator(db, FakeVoice(), cfg={"wait_for_clips": False}).run()] == ["done"]
+
+
+def test_audio_generator_gives_up_after_max_attempts_and_raises_when_all_fail():
+    db = _db_with_narration_ready(1)
+    pipe = AudioGenerator(db, FakeVoice(fail_on={"t0"}), cfg={"max_attempts_per_script": 2})
+    for _ in range(2):
+        with pytest.raises(AudioGenerationError):
+            pipe.run()
+    assert pipe.run() == []  # given up on
+    assert (db.tables["audio_files"][0]["status"], db.tables["audio_files"][0]["attempts"]) == ("failed", 2)
+
+
+def test_openai_tts_sends_settings_and_estimates_cost(monkeypatch):
+    sent = {}
+
+    def fake_post(url, json=None, headers=None, timeout=None):
+        sent.update(url=url, json=json)
+        return FakeReply(content=b"mp3 bytes")
+
+    monkeypatch.setattr("avgen.audio.openai_tts.requests.post", fake_post)
+    monkeypatch.setattr("avgen.audio.openai_tts.mp3_seconds", lambda audio: 30.0)
+    voice = create_voice({"provider": "openai_tts", "api_key": "k", "instructions": "calm", "usd_per_minute": 0.015})
+    narration = voice.narrate("  Hello there.  ")
+    assert sent["url"].endswith("/audio/speech")
+    assert sent["json"] == {"model": "gpt-4o-mini-tts", "voice": "alloy", "input": "Hello there.",
+                            "response_format": "mp3", "instructions": "calm"}
+    assert (narration.audio, narration.characters, narration.seconds, narration.cost_usd) == (b"mp3 bytes", 12, 30.0, 0.0075)
+    with pytest.raises(ValueError):
+        voice.narrate("x" * 5000)

@@ -8,13 +8,14 @@ across buckets:
     scripts       2026-11-05/topic_42_the-town-that-vanished_070000Z.txt
     scenes        2026-11-05/script_7_the-town-that-vanished.json
     video-scenes  2026-11-09/script_7_the-town-that-vanished/scene_000.mp4  (*)
-    audio         2026-11-05/script_7_the-town-that-vanished/narration.mp3
+    audio         2026-11-10/script_7_the-town-that-vanished/narration.mp3  (*)
     final-videos  2026-11-05/script_7_the-town-that-vanished.mp4
 
-(*) The exception: clips are dated the day the script's first clip was made,
-since the video stage works through a backlog and may reach a script days
-after it was written. The script number in the name still ties them together.
-See VideoPipeline._clip_folder.
+(*) The exceptions: clips are dated the day the script's first clip was made,
+and narration the day it was made, since those stages work through a
+backlog and may reach a script days after it was written. The script number
+in the name still ties them together. See VideoPipeline._clip_folder and
+AudioGenerator._narrate_one.
 
 Storage folders are just part of the path, so they appear automatically with
 the first upload.

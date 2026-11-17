@@ -6,7 +6,7 @@ Pipeline (all state in the Supabase `avgen` schema plus storage buckets, see `su
 2. `scripts` – topics -> script file in storage + `scripts` log row.
 3. `scenes` – scripts -> 2–5 s scene JSON + `scene_files` log row. The LLM's reply is checked (and retried once if unusable); a failing script is skipped and retried next run. Up to `max_per_run` (20) scripts per run. Runs daily via `.github/workflows/daily-scenes.yml`.
 4. `videos` – scenes without clips -> Seedance via BytePlus ModelArk (`ARK_API_KEY`; 480p 9:16 by default, ~$0.05 per 5s clip) -> storage + one `video_scenes` row per scene. Works on up to `max_scene_files_per_run` (5) scene files per run, i.e. all the missing clips of up to 5 scripts. A failing scene is retried on later runs, up to `max_attempts_per_scene` (3) attempts, then given up on (logged as a warning every run). Runs daily via `.github/workflows/daily-videos.yml`.
-5. `audio` – narration (TTS) and optional music -> storage + `audio_files` log.
+5. `audio` – scripts whose clips are all made -> narration via OpenAI text-to-speech (`gpt-4o-mini-tts`, ~$0.015 per minute; OpenAI retires it on 6 Jan 2027) and optional music -> storage + one `audio_files` row per script, with its estimated cost. Up to `max_scripts_per_run` (10) scripts per run; a failing script is retried on later runs, up to `max_attempts_per_script` (3) attempts. Runs daily via `.github/workflows/daily-audio.yml`.
 6. `assemble` – ffmpeg merges clips + audio -> `final_videos`. (YouTube upload is a future extension.)
 
 ## Usage

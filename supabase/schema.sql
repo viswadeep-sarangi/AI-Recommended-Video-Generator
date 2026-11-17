@@ -62,6 +62,27 @@ create table if not exists avgen.audio_files (
   id bigint generated always as identity primary key,
   script_id bigint references avgen.scripts(id), narration_path text, music_path text,
   created_at timestamptz default now());
+-- One row per script: retries update the row and count `attempts` (the audio stage gives up after
+-- max_attempts_per_script). Safe to re-run: older rows count as "done", and any duplicate rows
+-- are merged, keeping the "done" row (or else the newest) per script.
+alter table avgen.audio_files add column if not exists status text not null default 'done';
+alter table avgen.audio_files add column if not exists attempts int not null default 1;
+alter table avgen.audio_files add column if not exists error text;
+alter table avgen.audio_files add column if not exists updated_at timestamptz default now();
+delete from avgen.audio_files a using (
+  select id, row_number() over (partition by script_id order by (status = 'done') desc, id desc) as rank
+  from avgen.audio_files) ranked
+where a.id = ranked.id and ranked.rank > 1;
+create unique index if not exists audio_files_one_row_per_script on avgen.audio_files (script_id);
+-- How each narration was made, filled in when it succeeds. cost_usd is an estimate from the price
+-- in the config; the real charge is on OpenAI's usage page.
+alter table avgen.audio_files add column if not exists provider text;
+alter table avgen.audio_files add column if not exists model text;
+alter table avgen.audio_files add column if not exists voice text;
+alter table avgen.audio_files add column if not exists characters int;
+alter table avgen.audio_files add column if not exists audio_seconds numeric;
+alter table avgen.audio_files add column if not exists cost_usd numeric(12, 6);
+alter table avgen.audio_files add column if not exists details jsonb;
 create table if not exists avgen.final_videos (
   id bigint generated always as identity primary key,
   script_id bigint references avgen.scripts(id), file_path text,

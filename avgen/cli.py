@@ -3,7 +3,8 @@ import logging
 import time
 
 from .assembler import Assembler
-from .audio import AudioGenerator
+from .audio import create_music, create_voice
+from .audio_generator import AudioGenerator
 from .config import load_config
 from .llm import create_llm
 from .log import log_group, setup_logging
@@ -40,7 +41,8 @@ def main(argv=None):
             elif st == "videos":
                 res = VideoPipeline(db, create_video_provider(cfg["video"]["provider"]), cfg["video"]).run()
             elif st == "audio":
-                res = AudioGenerator(db, cfg["audio"]).run_pending()
+                audio = cfg["audio"]
+                res = AudioGenerator(db, create_voice(audio["voice"]), create_music(audio.get("music")), audio).run()
             else:
                 res = Assembler(db, cfg.get("assemble")).run_pending()
             log.info("%s: %d item(s) in %.1fs", st, len(res), time.monotonic() - started)
