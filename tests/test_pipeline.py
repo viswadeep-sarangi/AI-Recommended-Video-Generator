@@ -11,7 +11,7 @@ from avgen.scene_generator import (InvalidSceneReply, SceneGenerationError, Scen
 from avgen.scout import SOURCES, RecommendationFinder, fetch_youtube
 from avgen.storage_paths import day_folder
 from avgen.video import Clip, create_video_provider
-from avgen.video_pipeline import VideoGenerationError, VideoPipeline
+from avgen.video_generator import VideoGenerationError, VideoGenerator
 
 
 class FakeDB:
@@ -278,9 +278,9 @@ class FakeProvider:
         return Clip(b"mp4", model="m", resolution="480p", ratio="9:16", seconds=5, tokens=49005, cost_usd=0.049)
 
 
-def test_video_pipeline_does_one_scene_file_per_run_and_retries_on_the_same_row():
+def test_video_generator_does_one_scene_file_per_run_and_retries_on_the_same_row():
     db = _db_with_scene_files(2)
-    pipe = VideoPipeline(db, FakeProvider(fail_on={"p2"}, times=1))
+    pipe = VideoGenerator(db, FakeProvider(fail_on={"p2"}, times=1))
 
     first = pipe.run()  # only the first scene file; scene p2 fails
     assert [(r["script_id"], r["status"], r["attempts"]) for r in first] == [(1, "done", 1), (1, "failed", 1)]
@@ -295,13 +295,13 @@ def test_video_pipeline_does_one_scene_file_per_run_and_retries_on_the_same_row(
 
     third = pipe.run()  # now the second file
     assert [(r["script_id"], r["status"]) for r in third] == [(2, "done"), (2, "done")]
-    assert VideoPipeline(db, FakeProvider(), {"max_scene_files_per_run": 5}).run() == []
+    assert VideoGenerator(db, FakeProvider(), {"max_scene_files_per_run": 5}).run() == []
 
 
-def test_video_pipeline_dates_clip_folders_by_first_clip_not_by_script():
+def test_video_generator_dates_clip_folders_by_first_clip_not_by_script():
     db = _db_with_scene_files(1)
     db.tables["scripts"][0]["created_at"] = "2026-01-01T07:00:00Z"  # written long before its clips
-    pipe = VideoPipeline(db, FakeProvider(fail_on={"p2"}, times=1))
+    pipe = VideoGenerator(db, FakeProvider(fail_on={"p2"}, times=1))
 
     first = pipe.run()  # p1 done today, p2 fails
     assert first[0]["file_path"].startswith(day_folder() + "/script_1_")
@@ -312,9 +312,9 @@ def test_video_pipeline_dates_clip_folders_by_first_clip_not_by_script():
     assert retry[0]["file_path"] == "2025-12-31/script_1_x/scene_001.mp4"
 
 
-def test_video_pipeline_gives_up_on_a_scene_after_max_attempts():
+def test_video_generator_gives_up_on_a_scene_after_max_attempts():
     db = _db_with_scene_files(2)
-    pipe = VideoPipeline(db, FakeProvider(fail_on={"p2"}), {"max_attempts_per_scene": 2})
+    pipe = VideoGenerator(db, FakeProvider(fail_on={"p2"}), {"max_attempts_per_scene": 2})
 
     pipe.run()  # file 1: p1 done, p2 attempt 1 fails
     with pytest.raises(VideoGenerationError):
@@ -325,14 +325,14 @@ def test_video_pipeline_gives_up_on_a_scene_after_max_attempts():
     assert sorted((r["scene_index"], r["status"], r["attempts"]) for r in rows) == [(0, "done", 1), (1, "failed", 2)]
 
     # raising the limit makes the given-up scene worth trying again
-    retry = VideoPipeline(db, FakeProvider(), {"max_attempts_per_scene": 3}).run()
+    retry = VideoGenerator(db, FakeProvider(), {"max_attempts_per_scene": 3}).run()
     assert [(r["script_id"], r["scene_index"], r["status"], r["attempts"]) for r in retry] == [(1, 1, "done", 3)]
 
 
-def test_video_pipeline_raises_when_every_scene_fails():
+def test_video_generator_raises_when_every_scene_fails():
     db = _db_with_scene_files(1, '[{"narration":"a","visual_prompt":"p","duration":3}]')
     with pytest.raises(VideoGenerationError):
-        VideoPipeline(db, FakeProvider(fail_on={"p"})).run()
+        VideoGenerator(db, FakeProvider(fail_on={"p"})).run()
     assert db.tables["video_scenes"][0]["status"] == "failed"
 
 

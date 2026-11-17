@@ -14,7 +14,7 @@ across buckets:
 (*) The exceptions: clips are dated the day the script's first clip was made,
 and narration the day it was made, since those stages work through a
 backlog and may reach a script days after it was written. The script number
-in the name still ties them together. See VideoPipeline._clip_folder and
+in the name still ties them together. See VideoGenerator._clip_folder and
 AudioGenerator._narrate_one.
 
 Storage folders are just part of the path, so they appear automatically with

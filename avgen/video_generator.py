@@ -58,7 +58,7 @@ class VideoGenerationError(RuntimeError):
     """Every scene tried in this run failed."""
 
 
-class VideoPipeline:
+class VideoGenerator:
     def __init__(self, db, provider, cfg=None):
         self.db = db              # Supabase: tables and file storage
         self.provider = provider  # the video service that makes the clips (Seedance)
