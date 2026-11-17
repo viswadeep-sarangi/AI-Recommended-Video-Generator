@@ -2,8 +2,11 @@ import json
 
 import pytest
 
-from avgen.audio import Narration, create_voice
+from avgen.audio import Narration, Transcript, create_transcriber, create_voice
 from avgen.audio_generator import AudioGenerationError, AudioGenerator
+from avgen.captions import ass_colour, group_words, to_ass
+from avgen import assembler
+from avgen.assembler import Assembler, AssemblyError, build_ffmpeg_cmd, plan_timing
 from avgen.config import _resolve
 from avgen.llm import LLM, extract_json, wrap_prompt
 from avgen.scene_generator import (InvalidSceneReply, SceneGenerationError, SceneGenerator, normalize_scenes,
@@ -478,3 +481,184 @@ def test_openai_tts_sends_settings_and_estimates_cost(monkeypatch):
     assert (narration.audio, narration.characters, narration.seconds, narration.cost_usd) == (b"mp3 bytes", 12, 30.0, 0.0075)
     with pytest.raises(ValueError):
         voice.narrate("x" * 5000)
+
+
+def test_plan_timing_fits_clips_to_the_narration():
+    # planned 2s + 3s; clips came out 3s + 3s; narration is 6s -> shares 2.4s and 3.6s
+    timing = plan_timing([2, 3], [3, 3], 6)
+    assert [(t["seconds"], t["use_seconds"], t["slowdown"]) for t in timing] == [(2.4, 2.4, 1.0), (3.6, 3.0, 1.2)]
+    assert sum(t["seconds"] for t in timing) == 6
+    # without plans, time is shared by clip length
+    assert [t["seconds"] for t in plan_timing(None, [2, 6], 4)] == [1.0, 3.0]
+
+
+def test_build_ffmpeg_cmd_trims_stretches_and_mixes_music():
+    timing = plan_timing([2, 3], [3, 3], 6)
+    cmd = build_ffmpeg_cmd(["a.mp4", "b.mp4"], timing, "n.mp3", "m.mp3", "out.mp4", 0.2)
+    graph = cmd[cmd.index("-filter_complex") + 1]
+    assert "[0:v]trim=duration=2.4,setpts=1.0*(PTS-STARTPTS)" in graph
+    assert "[1:v]trim=duration=3.0,setpts=1.2*(PTS-STARTPTS)" in graph
+    assert "[v0][v1]concat=n=2:v=1:a=0[v]" in graph and "[3:a]volume=0.2" in graph
+    plain = build_ffmpeg_cmd(["a.mp4"], timing[:1], "n.mp3", None, "out.mp4")
+    assert plain[plain.index("[v]") + 2] == "1:a"
+
+
+def _db_ready_to_assemble(count):
+    db = _db_with_narration_ready(count)
+    for row in db.tables["scene_files"]:
+        db.upload("scenes", row["file_path"], b'{"scenes": [{"index": 0, "duration": 3}]}')
+    for row in db.tables["video_scenes"]:
+        row.update(file_path=f"clip{row['script_id']}.mp4", cost_usd=0.05)
+        db.upload("videos", row["file_path"], b"mp4")
+    for script in db.tables["scripts"]:
+        db.insert("audio_files", {"script_id": script["id"], "status": "done", "cost_usd": 0.0075,
+                                  "narration_path": f"n{script['id']}.mp3"})
+        db.upload("audio", f"n{script['id']}.mp3", b"mp3")
+    return db
+
+
+def _fake_ffmpeg(monkeypatch, fail_first=0):
+    """Fake ffmpeg/ffprobe: every file is 4s long; the first `fail_first` videos fail to build."""
+    monkeypatch.setattr(assembler, "media_seconds", lambda path: 4.0)
+    calls = []
+
+    def run(cmd, cwd=None):
+        calls.append(cmd)
+        if len(calls) <= fail_first:
+            raise RuntimeError("ffmpeg failed")
+        open(cmd[-1], "wb").write(b"final")
+
+    monkeypatch.setattr(assembler, "run_ffmpeg", run)
+
+
+def test_assembler_keeps_going_after_a_failure_and_records_cost(monkeypatch):
+    db = _db_ready_to_assemble(2)
+    _fake_ffmpeg(monkeypatch, fail_first=1)
+    first = Assembler(db).run()
+    assert [(r["script_id"], r["status"]) for r in first] == [(1, "failed"), (2, "done")]
+    made = first[1]
+    assert made["file_path"] == f"{day_folder()}/script_2_untitled.mp4"
+    assert (made["clip_count"], made["seconds"], made["cost_usd"]) == (1, 4.0, 0.0575)
+    assert db.files[("final", made["file_path"])] == b"final"
+
+    second = Assembler(db).run()  # the failed script is retried on its own row
+    assert [(r["script_id"], r["status"], r["attempts"]) for r in second] == [(1, "done", 2)]
+    assert len(db.tables["final_videos"]) == 2 and Assembler(db).run() == []
+
+
+def test_assembler_waits_for_narration_and_gives_up_after_max_attempts(monkeypatch):
+    db = _db_ready_to_assemble(1)
+    db.tables["audio_files"][0]["status"] = "failed"
+    _fake_ffmpeg(monkeypatch)
+    assert Assembler(db).run() == []  # no finished narration yet
+
+    db.tables["audio_files"][0]["status"] = "done"
+    monkeypatch.setattr(assembler, "run_ffmpeg", lambda cmd, cwd=None: (_ for _ in ()).throw(RuntimeError("bad")))
+    pipe = Assembler(db, {"max_attempts_per_script": 2})
+    for _ in range(2):
+        with pytest.raises(AssemblyError):
+            pipe.run()
+    assert pipe.run() == []
+
+
+WORDS = [{"word": w, "start": i * 0.3, "end": i * 0.3 + 0.25}
+         for i, w in enumerate(["The", "town", "that", "vanished.", "Nobody", "knows", "why", "it", "happened"])]
+
+
+def test_group_words_makes_short_captions_and_breaks_at_sentences_and_pauses():
+    captions = group_words(WORDS, min_words=2, max_words=4)
+    assert [c["text"] for c in captions] == ["The town that vanished.", "Nobody knows why it", "happened"]
+    assert captions[0]["start"] == 0.0 and captions[0]["end"] == captions[1]["start"]  # no flicker between
+    assert [c["text"] for c in group_words(WORDS, 1, 2)] == ["The town", "that vanished.", "Nobody knows",
+                                                            "why it", "happened"]
+    paused = [dict(w) for w in WORDS[:4]]
+    paused[2]["start"], paused[2]["end"], paused[3]["start"], paused[3]["end"] = 2.0, 2.2, 2.3, 2.5
+    assert [c["text"] for c in group_words(paused, 2, 4)] == ["The town", "that vanished."]
+    with pytest.raises(ValueError):
+        group_words(WORDS, 3, 2)
+
+
+def test_subtitle_style_is_configurable():
+    assert ass_colour("#0000FF") == "&H00FF0000"      # blue, solid (.ass is blue-green-red)
+    assert ass_colour("#FFFF0080") == "&H7F00FFFF"    # yellow, half see-through
+    ass = to_ass(group_words(WORDS[:2]), {"color": "#0000FF", "outline_color": "#FFFF00", "font_size": 70,
+                                          "uppercase": True, "position": "top"}, 1080, 1920)
+    style = next(line for line in ass.splitlines() if line.startswith("Style: "))
+    assert style.startswith("Style: Caption,DejaVu Sans,70,&H00FF0000,&H00FF0000,&H0000FFFF,")
+    assert ",8," in style  # top
+    assert "PlayResY: 1920" in ass and "Dialogue: 0,0:00:00.00,0:00:00.55,Caption,,0,0,0,,THE TOWN" in ass
+    with pytest.raises(ValueError):
+        to_ass([], {"position": "left"})
+
+
+def test_ffmpeg_cmd_makes_a_fixed_9_16_output_and_burns_subtitles():
+    timing = plan_timing([2], [3], 2)
+    cmd = build_ffmpeg_cmd(["a.mp4"], timing, "n.mp3", None, "out.mp4", subtitles="captions.ass")
+    graph = cmd[cmd.index("-filter_complex") + 1]
+    assert "scale=1080:1920:force_original_aspect_ratio=increase,crop=1080:1920,fps=30" in graph
+    assert "concat=n=1:v=1:a=0[joined];[joined]subtitles=captions.ass[v]" in graph
+    assert cmd[cmd.index("-crf") + 1] == "20" and cmd[cmd.index("-ar") + 1] == "48000"
+    padded = build_ffmpeg_cmd(["a.mp4"], timing, "n.mp3", None, "o.mp4", output={"width": 720, "height": 1280,
+                                                                                  "fit": "pad"})
+    assert "pad=720:1280:(ow-iw)/2:(oh-ih)/2:color=black" in padded[padded.index("-filter_complex") + 1]
+
+
+def test_assembler_burns_subtitles_from_the_narration_word_timings(monkeypatch):
+    db = _db_ready_to_assemble(1)
+    db.tables["audio_files"][0].update(words=WORDS, transcription_cost_usd=0.003)
+    _fake_ffmpeg(monkeypatch)
+    calls = []
+    real = assembler.run_ffmpeg
+
+    def run(cmd, cwd=None):
+        calls.append((cmd, (cwd / "captions.ass").read_text()))
+        real(cmd, cwd)
+
+    monkeypatch.setattr(assembler, "run_ffmpeg", run)
+    made = Assembler(db, {"subtitles": {"max_words": 3}}).run()[0]
+    cmd, ass = calls[0]
+    assert "subtitles=captions.ass" in cmd[cmd.index("-filter_complex") + 1]
+    assert "Caption,,0,0,0,,The town that" in ass
+    assert made["details"]["subtitles"] == 3 and made["narration_cost_usd"] == 0.0105
+
+
+class FakeTranscriber:
+    name = "fake"
+
+    def __init__(self):
+        self.calls = 0
+
+    def transcribe(self, audio, seconds=None, script_text=None):
+        self.calls += 1
+        return Transcript(words=WORDS, model="whisper-1", cost_usd=0.003)
+
+
+def test_audio_adds_word_timings_and_backfills_old_narrations():
+    db = _db_with_narration_ready(2)
+    AudioGenerator(db, FakeVoice(), cfg={"max_scripts_per_run": 1}).run()  # captions off: no word timings
+    assert db.tables["audio_files"][0].get("words") is None
+
+    voice, transcriber = FakeVoice(), FakeTranscriber()
+    rows = AudioGenerator(db, voice, cfg={}, transcriber=transcriber).run()
+    # script 1 only gets word timings (not narrated again); script 2 is narrated and timed
+    assert voice.texts == ["t1"] and transcriber.calls == 2
+    assert [(r["script_id"], r["status"], len(r["words"])) for r in rows] == [(1, "done", 9), (2, "done", 9)]
+    assert rows[0]["transcription_model"] == "whisper-1" and rows[0]["cost_usd"] == 0.0075  # narration cost kept
+    assert AudioGenerator(db, voice, cfg={}, transcriber=transcriber).run() == []
+
+
+def test_openai_transcriber_asks_for_word_timings(monkeypatch):
+    sent = {}
+
+    def fake_post(url, data=None, files=None, headers=None, timeout=None):
+        sent.update(url=url, data=data)
+        return FakeReply({"text": "Hi there", "duration": 1.0,
+                          "words": [{"word": " Hi", "start": 0.0, "end": 0.4}, {"word": "there", "start": 0.4, "end": 0.9}]})
+
+    monkeypatch.setattr("avgen.audio.transcribe.requests.post", fake_post)
+    assert create_transcriber({"enabled": False}) is None
+    transcriber = create_transcriber({"enabled": True, "api_key": "k", "model": "whisper-1", "usd_per_minute": 0.006})
+    transcript = transcriber.transcribe(b"mp3", seconds=30, script_text="Hi there")
+    assert sent["url"].endswith("/audio/transcriptions")
+    assert sent["data"]["timestamp_granularities[]"] == "word" and sent["data"]["response_format"] == "verbose_json"
+    assert transcript.words[0] == {"word": "Hi", "start": 0.0, "end": 0.4} and transcript.cost_usd == 0.003

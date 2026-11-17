@@ -7,9 +7,15 @@ This stage picks the oldest scripts that still need a narration (at most
      script and dated the day the narration was made, e.g.
          2026-11-17/script_7_the-town-that-vanished/narration.mp3
      (plus music.mp3 next to it, if music is set up),
-  3. records it in the `audio_files` table: "done" with how it was made
-     (model, voice, characters, length, estimated cost in USD), or
-     "failed" with the error.
+  3. if captions are on, sends the mp3 to a transcription model (whisper-1)
+     to learn when each word is spoken; the assemble stage turns these word
+     timings into subtitles,
+  4. records it in the `audio_files` table: "done" with how it was made
+     (model, voice, characters, length, word timings, estimated cost in
+     USD), or "failed" with the error.
+
+Narrations made before captions were switched on get their word timings on
+the next run, without being narrated again.
 
 By default (`wait_for_clips`: true) a script is only narrated once all its
 clips are made: until then it can't be assembled anyway, and its narration
@@ -57,11 +63,12 @@ class AudioGenerationError(RuntimeError):
 
 
 class AudioGenerator:
-    def __init__(self, db, voice, music=None, cfg=None):
-        self.db = db          # Supabase: tables and file storage
-        self.voice = voice    # the service that reads the script aloud (OpenAI TTS)
-        self.music = music    # background music, or None for none
-        self.cfg = cfg or {}  # the "audio" section of the config
+    def __init__(self, db, voice, music=None, cfg=None, transcriber=None):
+        self.db = db                    # Supabase: tables and file storage
+        self.voice = voice              # the service that reads the script aloud (OpenAI TTS)
+        self.music = music              # background music, or None for none
+        self.cfg = cfg or {}            # the "audio" section of the config
+        self.transcriber = transcriber  # word timings for subtitles (whisper-1), or None for no subtitles
 
         self.max_attempts = self.cfg.get("max_attempts_per_script", DEFAULT_MAX_ATTEMPTS_PER_SCRIPT)
         self.wait_for_clips = self.cfg.get("wait_for_clips", True)
@@ -97,55 +104,40 @@ class AudioGenerator:
             log.info("%d script(s) left for later runs (max_scripts_per_run=%d): #%s", len(left_over), how_many,
                      ", #".join(str(script["id"]) for script, _ in left_over))
 
-        rows = []
+        outcomes = []  # (row, worked, cost of this run's work)
         for number, (script, previous) in enumerate(batch, start=1):
-            rows.append(self._narrate_one(script, previous, number, len(batch)))
+            outcomes.append(self._narrate_one(script, previous, number, len(batch)))
 
-        self._log_summary(rows)
-        failed = [row for row in rows if row["status"] == "failed"]
-        if failed and len(failed) == len(rows):
+        self._log_summary(outcomes)
+        failed = [row for row, worked, _ in outcomes if not worked]
+        if failed and len(failed) == len(outcomes):
             raise AudioGenerationError(f"all {len(failed)} script(s) failed; see the errors above")
-        return rows
+        return [row for row, _, _ in outcomes]
 
     # --- Narrating one script ------------------------------------------------
 
     def _narrate_one(self, script, previous, number, total):
-        """Narrate, upload and record one script.
+        """Narrate (or just add word timings to), upload and record one script.
 
-        `previous` is the script's existing `audio_files` row (from an
-        earlier failed attempt), or None the first time. Never raises: a
-        failure is logged and recorded as "failed".
+        `previous` is the script's existing `audio_files` row: from an
+        earlier failed attempt, or a finished narration that still needs
+        word timings; None the first time. Never raises: a failure is
+        logged and recorded. Returns (row, worked, cost of this run's work).
         """
         attempt = (previous["attempts"] if previous else 0) + 1
-        _, label = script_location(self.db, script)
-        folder = f"{day_folder()}/{label}"  # dated today: the day the narration is made
-        log.info("[%d/%d] script #%s, attempt %d/%d -> %s/", number, total, script["id"], attempt,
-                 self.max_attempts, folder)
-
+        timings_only = previous is not None and previous.get("status", "done") == "done"
         started = time.monotonic()
         try:
             text = self.db.download("scripts", script["file_path"])
             text = text.decode("utf-8") if isinstance(text, bytes) else text
-            log.info("  %d characters | %s", len(text), _preview(text))
-            log.debug("  full script: %s", text)
-
-            narration = self.voice.narrate(text)
-            log.info("  narration made in %.1fs: %s, %ss, voice %s, %s", time.monotonic() - started,
-                     _size(len(narration.audio)), narration.seconds, narration.voice, _dollars(narration.cost_usd))
-            narration_path = f"{folder}/narration.mp3"
-            self.db.upload("audio", narration_path, narration.audio, "audio/mpeg")
-            log.info("  saved to the audio bucket: %s", narration_path)
-
-            music_path = None
-            if self.music:
-                prompt = self.cfg.get("music_prompt") or text[:200]
-                track = self.music.music(prompt, narration.seconds or script.get("target_seconds") or 30)
-                music_path = f"{folder}/music.mp3"
-                self.db.upload("audio", music_path, track, "audio/mpeg")
-                log.info("  music saved to the audio bucket: %s", music_path)
-
-            result = {"status": "done", "narration_path": narration_path, "music_path": music_path, "error": None,
-                      **_narration_details(narration)}
+            if timings_only:
+                log.info("[%d/%d] script #%s: narration already made, adding word timings for subtitles "
+                         "(attempt %d/%d)", number, total, script["id"], attempt, self.max_attempts)
+                audio = self.db.download("audio", previous["narration_path"])
+                result = {"error": None, **self._word_timings(audio, previous.get("audio_seconds"), text)}
+            else:
+                result = self._make_narration(script, text, attempt, number, total)
+            worked = True
         except Exception as error:
             if attempt < self.max_attempts:
                 next_step = "the next run will try it again"
@@ -153,27 +145,79 @@ class AudioGenerator:
                 next_step = "that was the last attempt, so it is given up on"
             log.exception("  script #%s failed after %.1fs (attempt %d/%d): %s. Moving on; %s.", script["id"],
                           time.monotonic() - started, attempt, self.max_attempts, error, next_step)
-            result = {"status": "failed", "error": str(error)[:MAX_ERROR_CHARS]}
+            # a finished narration stays "done" (it can still be assembled, just without subtitles)
+            result = {"error": str(error)[:MAX_ERROR_CHARS], **({} if timings_only else {"status": "failed"})}
+            worked = False
 
-        return self._record_attempt(script, previous, attempt, result)
+        cost = _total([result.get("cost_usd"), result.get("transcription_cost_usd")] if not timings_only
+                      else [result.get("transcription_cost_usd")])
+        return self._record_attempt(script, previous, attempt, result), worked, cost
+
+    def _make_narration(self, script, text, attempt, number, total):
+        """Narrate the script, save the mp3 (and music), and add word timings; returns the row's new values."""
+        _, label = script_location(self.db, script)
+        folder = f"{day_folder()}/{label}"  # dated today: the day the narration is made
+        log.info("[%d/%d] script #%s, attempt %d/%d -> %s/", number, total, script["id"], attempt,
+                 self.max_attempts, folder)
+        log.info("  %d characters | %s", len(text), _preview(text))
+        log.debug("  full script: %s", text)
+
+        started = time.monotonic()
+        narration = self.voice.narrate(text)
+        log.info("  narration made in %.1fs: %s, %ss, voice %s, %s", time.monotonic() - started,
+                 _size(len(narration.audio)), narration.seconds, narration.voice, _dollars(narration.cost_usd))
+        narration_path = f"{folder}/narration.mp3"
+        self.db.upload("audio", narration_path, narration.audio, "audio/mpeg")
+        log.info("  saved to the audio bucket: %s", narration_path)
+
+        music_path = None
+        if self.music:
+            prompt = self.cfg.get("music_prompt") or text[:200]
+            track = self.music.music(prompt, narration.seconds or script.get("target_seconds") or 30)
+            music_path = f"{folder}/music.mp3"
+            self.db.upload("audio", music_path, track, "audio/mpeg")
+            log.info("  music saved to the audio bucket: %s", music_path)
+
+        timings = self._word_timings(narration.audio, narration.seconds, text) if self.transcriber else {}
+        return {"status": "done", "narration_path": narration_path, "music_path": music_path, "error": None,
+                **_narration_details(narration), **timings}
+
+    def _word_timings(self, audio, seconds, text):
+        """When each word is spoken (for subtitles); returns the row's new values."""
+        started = time.monotonic()
+        transcript = self.transcriber.transcribe(audio, seconds=seconds, script_text=text)
+        log.info("  word timings from %s in %.1fs: %d word(s), %s", transcript.model, time.monotonic() - started,
+                 len(transcript.words), _dollars(transcript.cost_usd))
+        log.debug("  words: %s", " ".join(word["word"] for word in transcript.words))
+        return {"words": transcript.words, "transcription_model": transcript.model,
+                "transcription_cost_usd": transcript.cost_usd}
+
+    def _needs_word_timings(self, row):
+        return self.transcriber is not None and not row.get("words")
 
     def _worth_trying(self, row):
-        """True if a script with this `audio_files` row (None = never tried) should be narrated now."""
+        """True if a script with this `audio_files` row (None = never tried) should be worked on now.
+
+        That is: never tried, failed with attempts left, or narrated but
+        still missing the word timings the subtitles need (attempts left).
+        """
         if row is None:
             return True
-        return row.get("status", "done") != "done" and (row.get("attempts") or 0) < self.max_attempts
+        if (row.get("attempts") or 0) >= self.max_attempts:
+            return False
+        return row.get("status", "done") != "done" or self._needs_word_timings(row)
 
     # --- Logging ------------------------------------------------------------
 
-    def _log_summary(self, rows):
-        done = [row for row in rows if row["status"] == "done"]
-        failed = [row for row in rows if row["status"] == "failed"]
-        costs = [row["cost_usd"] for row in done if row.get("cost_usd") is not None]
-        log.info("done: narrated %d of %d script(s), %d failed; estimated cost this run: %s", len(done), len(rows),
-                 len(failed), _dollars(sum(costs)) if costs else "unknown")
-        for row in done:
-            log.info("  ok     script #%s -> %s (%s)", row["script_id"], row["narration_path"],
-                     _dollars(row.get("cost_usd")))
+    def _log_summary(self, outcomes):
+        failed = [row for row, worked, _ in outcomes if not worked]
+        costs = [cost for _, _, cost in outcomes if cost is not None]
+        log.info("done: %d of %d script(s) worked, %d failed; estimated cost this run: %s",
+                 len(outcomes) - len(failed), len(outcomes), len(failed), _dollars(sum(costs)) if costs else "unknown")
+        for row, worked, cost in outcomes:
+            if worked:
+                log.info("  ok     script #%s -> %s (%d word timings, %s)", row["script_id"], row["narration_path"],
+                         len(row.get("words") or []), _dollars(cost))
         for row in failed:
             log.error("  FAILED script #%s (attempt %s/%s): %s", row["script_id"], row["attempts"], self.max_attempts,
                       row.get("error"))
@@ -181,7 +225,7 @@ class AudioGenerator:
     def _warn_about_given_up(self, given_up):
         """One warning per script that ran out of attempts, so they aren't forgotten."""
         for row in given_up:
-            log.warning("script #%s's narration was given up on after %s attempt(s), so it can't be assembled. "
+            log.warning("script #%s's narration (or its word timings for subtitles) was given up on after %s attempt(s). "
                         "Last error: %s. To try again, raise max_attempts_per_script (now %s) or set attempts to 0 "
                         "for audio_files row #%s.", row["script_id"], row["attempts"], row.get("error"),
                         self.max_attempts, row["id"])
@@ -191,8 +235,8 @@ class AudioGenerator:
     def _scripts_waiting_for_narration(self):
         """(script, its `audio_files` row or None) for every script to narrate now, oldest first."""
         rows = {row["script_id"]: row for row in self.db.select("audio_files")}
-        self._warn_about_given_up([row for row in rows.values()
-                                   if row.get("status", "done") != "done" and not self._worth_trying(row)])
+        self._warn_about_given_up([row for row in rows.values() if not self._worth_trying(row)
+                                   and (row.get("status", "done") != "done" or self._needs_word_timings(row))])
 
         scripts = self.db.select("scripts", order="id.asc")
         needing = [script for script in scripts if self._worth_trying(rows.get(script["id"]))]
@@ -225,6 +269,12 @@ class AudioGenerator:
 
 
 # --- Small helpers -----------------------------------------------------------
+
+def _total(amounts):
+    """Sum of the known amounts; None if none are known."""
+    known = [amount for amount in amounts if amount is not None]
+    return round(sum(known), 6) if known else None
+
 
 def _narration_details(narration):
     """The `audio_files` columns that describe how a narration was made."""

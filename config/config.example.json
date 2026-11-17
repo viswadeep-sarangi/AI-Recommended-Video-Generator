@@ -76,7 +76,53 @@
       "instructions": "Energetic, curious storyteller. Clear and well paced.",
       "usd_per_minute": 0.015
     },
-    "music": {"provider": "none"}
+    "music": {"provider": "none"},
+    "captions": {
+      "enabled": true,
+      "provider": "openai",
+      "api_key": "env:OPENAI_API_KEY",
+      "model": "whisper-1",
+      "language": "en",
+      "usd_per_minute": 0.006
+    }
   },
-  "assemble": {"music_volume": 0.15}
+  "assemble": {
+    "max_scripts_per_run": 5,
+    "max_attempts_per_script": 3,
+    "music_volume": 0.15,
+    "output": {
+      "width": 1080,
+      "height": 1920,
+      "fps": 30,
+      "fit": "crop",
+      "crf": 20,
+      "preset": "medium",
+      "audio_bitrate": "192k",
+      "audio_sample_rate": 48000
+    },
+    "subtitles": {
+      "enabled": true,
+      "min_words": 2,
+      "max_words": 4,
+      "max_pause_seconds": 0.6,
+      "style": {
+        "font": "DejaVu Sans",
+        "font_size": 84,
+        "bold": true,
+        "italic": false,
+        "uppercase": false,
+        "color": "#FFFFFF",
+        "outline_color": "#000000",
+        "outline_width": 6,
+        "shadow_color": "#00000080",
+        "shadow_depth": 3,
+        "box": false,
+        "box_color": "#000000B0",
+        "position": "bottom",
+        "margin_vertical": 520,
+        "margin_horizontal": 80,
+        "letter_spacing": 0
+      }
+    }
+  }
 }

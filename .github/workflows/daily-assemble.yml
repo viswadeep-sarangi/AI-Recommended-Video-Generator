@@ -1,0 +1,29 @@
+name: Daily assemble
+on:
+  schedule:
+    - cron: "0 13 * * *"  # one hour after the daily audio (12:00 UTC)
+  workflow_dispatch:
+    inputs:
+      log_level:
+        description: "Log level (DEBUG also prints the full ffmpeg commands)"
+        type: choice
+        options: [DEBUG, INFO]
+        default: DEBUG
+jobs:
+  assemble:
+    runs-on: ubuntu-latest
+    # About a minute per video; max_scripts_per_run of them fit easily.
+    timeout-minutes: 60
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with: {python-version: "3.12"}
+      - run: sudo apt-get update && sudo apt-get install -y ffmpeg fonts-dejavu-core  # the font the subtitles use by default
+      - run: pip install -r requirements.txt
+      - run: cp config/config.example.json config/config.json
+      - run: python -m avgen assemble
+        env:
+          PYTHONUNBUFFERED: "1"
+          AVGEN_LOG_LEVEL: ${{ inputs.log_level || 'DEBUG' }}
+          SUPABASE_URL: ${{ secrets.SUPABASE_URL }}
+          SUPABASE_SERVICE_KEY: ${{ secrets.SUPABASE_SERVICE_KEY }}

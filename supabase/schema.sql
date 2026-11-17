@@ -83,10 +83,37 @@ alter table avgen.audio_files add column if not exists characters int;
 alter table avgen.audio_files add column if not exists audio_seconds numeric;
 alter table avgen.audio_files add column if not exists cost_usd numeric(12, 6);
 alter table avgen.audio_files add column if not exists details jsonb;
+-- When each word of the narration is spoken (for subtitles), from the transcription model.
+alter table avgen.audio_files add column if not exists words jsonb;
+alter table avgen.audio_files add column if not exists transcription_model text;
+alter table avgen.audio_files add column if not exists transcription_cost_usd numeric(12, 6);
 create table if not exists avgen.final_videos (
   id bigint generated always as identity primary key,
   script_id bigint references avgen.scripts(id), file_path text,
   created_at timestamptz default now());
+-- One row per script: retries update the row and count `attempts` (the assemble stage gives up
+-- after max_attempts_per_script). Safe to re-run: older rows count as "done", and any duplicate
+-- rows are merged, keeping the "done" row (or else the newest) per script.
+alter table avgen.final_videos add column if not exists status text not null default 'done';
+alter table avgen.final_videos add column if not exists attempts int not null default 1;
+alter table avgen.final_videos add column if not exists error text;
+alter table avgen.final_videos add column if not exists updated_at timestamptz default now();
+delete from avgen.final_videos f using (
+  select id, row_number() over (partition by script_id order by (status = 'done') desc, id desc) as rank
+  from avgen.final_videos) ranked
+where f.id = ranked.id and ranked.rank > 1;
+create unique index if not exists final_videos_one_row_per_script on avgen.final_videos (script_id);
+-- What went into each video, filled in when it succeeds. cost_usd = clips_cost_usd +
+-- narration_cost_usd, both estimates; `details` has the narration length and how each clip was fitted.
+alter table avgen.final_videos add column if not exists scene_file_id bigint references avgen.scene_files(id);
+alter table avgen.final_videos add column if not exists audio_file_id bigint references avgen.audio_files(id);
+alter table avgen.final_videos add column if not exists clip_count int;
+alter table avgen.final_videos add column if not exists seconds numeric;
+alter table avgen.final_videos add column if not exists size_bytes bigint;
+alter table avgen.final_videos add column if not exists clips_cost_usd numeric(12, 6);
+alter table avgen.final_videos add column if not exists narration_cost_usd numeric(12, 6);
+alter table avgen.final_videos add column if not exists cost_usd numeric(12, 6);
+alter table avgen.final_videos add column if not exists details jsonb;
 
 grant usage on schema avgen to service_role;
 grant all on all tables in schema avgen to service_role;
