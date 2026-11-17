@@ -13,7 +13,7 @@ from avgen.scene_generator import (InvalidSceneReply, SceneGenerationError, Scen
                                    parse_scene_reply)
 from avgen.scout import SOURCES, RecommendationFinder, fetch_youtube
 from avgen.storage_paths import day_folder
-from avgen.video import Clip, create_video_provider
+from avgen.video import Clip, ModelUnavailable, create_video_provider, create_video_providers
 from avgen.video_generator import VideoGenerationError, VideoGenerator
 
 
@@ -339,6 +339,69 @@ def test_video_generator_raises_when_every_scene_fails():
     assert db.tables["video_scenes"][0]["status"] == "failed"
 
 
+class PausedProvider:
+    """A model whose free quota is used up: every request says so."""
+    name = "fake"
+
+    def __init__(self, label="paused-model"):
+        self.label, self.calls = label, 0
+
+    def generate(self, prompt, duration):
+        self.calls += 1
+        raise ModelUnavailable(f"{self.label}: SetLimitExceeded")
+
+
+def test_video_generator_switches_model_when_one_is_paused_without_using_an_attempt():
+    db = _db_with_scene_files(1)
+    paused, working = PausedProvider(), FakeProvider()
+    rows = VideoGenerator(db, [paused, working]).run()
+
+    assert [(r["scene_index"], r["status"], r["attempts"]) for r in rows] == [(0, "done", 1), (1, "done", 1)]
+    assert paused.calls == 1  # dropped for the rest of the run after the first refusal
+
+
+def test_video_generator_stops_and_keeps_attempts_when_every_model_is_paused():
+    db = _db_with_scene_files(1)
+    VideoGenerator(db, FakeProvider(fail_on={"p2"}, times=1)).run()  # p2 attempt 1 fails
+    with pytest.raises(VideoGenerationError, match="paused"):
+        VideoGenerator(db, [PausedProvider("a"), PausedProvider("b")]).run()
+    p2 = [r for r in db.tables["video_scenes"] if r["scene_index"] == 1][0]
+    assert (p2["status"], p2["attempts"]) == ("failed", 1)  # untouched: the pause wasn't the scene's fault
+
+
+def test_video_generator_stops_at_the_monthly_cap_counting_earlier_runs_but_not_free_models():
+    from datetime import datetime, timezone
+
+    db = _db_with_scene_files(2)  # 4 scenes, each fake clip ~$0.049 from model "m"
+    now = datetime.now(timezone.utc).isoformat()
+    db.insert("video_scenes", {"scene_file_id": 99, "status": "done", "model": "x", "cost_usd": 0.04,
+                               "updated_at": now})  # earlier this month
+    db.insert("video_scenes", {"scene_file_id": 98, "status": "done", "model": "x", "cost_usd": 5,
+                               "updated_at": "2000-01-01T00:00:00+00:00"})  # another month: not counted
+    cfg = {"max_scene_files_per_run": 5, "max_usd_per_month": 0.1}
+
+    capped = VideoGenerator(db, FakeProvider(), cfg)
+    assert len(capped.run()) == 2  # $0.04 + 0.049 is under $0.10, + 0.049 more is not
+    assert "max_usd_per_month" in capped.stopped
+    assert VideoGenerator(db, FakeProvider(), cfg).run() == []  # the next run sees this month's total
+
+    free = FakeProvider()
+    free.model, free.free_quota_only = "m", True  # its clips (model "m") were free, so they don't count
+    rest = VideoGenerator(db, free, cfg).run()
+    assert len(rest) == 2 and all(r["status"] == "done" for r in rest)
+
+
+def test_create_video_providers_applies_each_model_over_the_shared_settings():
+    providers = create_video_providers({
+        "provider": {"type": "seedance", "api_key": "key", "resolution": "480p", "usd_per_million_tokens": 1.0},
+        "models": [{"model": "fast", "free_quota_only": True}, {"model": "pro", "usd_per_million_tokens": 2.5}],
+    })
+    assert [(p.model, p.resolution, p.usd_per_million_tokens, p.free_quota_only) for p in providers] == [
+        ("fast", "480p", 1.0, True), ("pro", "480p", 2.5, False)]
+    assert [p.model for p in create_video_providers({"provider": {"type": "seedance", "api_key": "k"}})] == [
+        "seedance-1-0-pro-fast-251015"]
+
+
 class FakeReply:
     def __init__(self, data=None, content=b""):
         self.data, self.content, self.status_code, self.text = data, content, 200, ""
@@ -402,6 +465,25 @@ def test_seedance_keeps_clip_length_within_limits_and_reports_failures(monkeypat
     with pytest.raises(RuntimeError, match="SensitiveContent rejected"):
         provider.generate("a foggy town", 2)
     assert "--duration 4 " in sent["body"]["content"][0]["text"]  # 2s raised to min_seconds
+
+
+def test_seedance_reports_a_paused_model_as_unavailable(monkeypatch):
+    _fake_seedance(monkeypatch, ["failed"], {"error": {"code": "SetLimitExceeded",
+                                                       "message": "reached the set usage limit"}})
+    provider = create_video_provider({"type": "seedance", "api_key": "key", "poll_seconds": 0})
+    with pytest.raises(ModelUnavailable, match="SetLimitExceeded"):
+        provider.generate("a foggy town", 3)
+
+
+def test_seedance_can_send_settings_as_request_fields_and_turn_sound_off(monkeypatch):
+    sent = _fake_seedance(monkeypatch, ["succeeded"])
+    provider = create_video_provider({"type": "seedance", "api_key": "key", "poll_seconds": 0,
+                                      "model": "seedance-1-5-pro-251215", "settings_in": "body",
+                                      "generate_audio": False, "min_seconds": 4})
+    provider.generate("a foggy town", 2)
+    body = sent["body"]
+    assert body["content"] == [{"type": "text", "text": "a foggy town"}]  # no flags in the text
+    assert (body["ratio"], body["resolution"], body["duration"], body["generate_audio"]) == ("9:16", "480p", 4, False)
 
 
 class FakeVoice:

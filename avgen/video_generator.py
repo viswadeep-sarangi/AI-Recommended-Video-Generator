@@ -24,10 +24,25 @@ the scene's `attempts` back to 0 in the table.
 Once every scene of a script has a clip, the assemble stage joins the clips
 with the narration and music into the final video.
 
-Both limits live in the "video" section of the config:
+Several models can be listed ("models" in the config), tried in order. When
+a model can't be used, for example its free quota is used up and BytePlus has
+paused it ("SetLimitExceeded"), the run switches to the next model for the
+rest of the run, and the scene's attempt isn't counted. Once every model is
+paused, the run stops and leaves the remaining scenes untouched for the next run.
+
+To keep spending in check, "max_usd_per_month" stops making clips once the
+clips made this calendar month (UTC) are estimated to cost that much. It adds
+up `cost_usd` of this month's finished clips in `video_scenes`, so the total
+carries over from run to run, and starts again from zero on the 1st. Clips
+from models marked "free_quota_only" (Safe Experience Mode on, so BytePlus
+never charges for them) don't count toward it. The estimate comes from the
+prices in the config; the real charge is on BytePlus's billing page.
+
+The limits live in the "video" section of the config:
 
     "max_scene_files_per_run": 1,
     "max_attempts_per_scene": 3,
+    "max_usd_per_month": 30,
 """
 import json
 import logging
@@ -35,6 +50,7 @@ import time
 from datetime import datetime, timezone
 
 from .storage_paths import day_folder, script_location
+from .video.base import ModelUnavailable
 
 log = logging.getLogger(__name__)
 
@@ -59,12 +75,23 @@ class VideoGenerationError(RuntimeError):
 
 
 class VideoGenerator:
-    def __init__(self, db, provider, cfg=None):
+    def __init__(self, db, providers, cfg=None):
         self.db = db              # Supabase: tables and file storage
-        self.provider = provider  # the video service that makes the clips (Seedance)
+        # The video services that make the clips, tried in order (one provider is fine too).
+        self.providers = list(providers) if isinstance(providers, (list, tuple)) else [providers]
         self.cfg = cfg or {}      # the "video" section of the config
 
         self.max_attempts = self.cfg.get("max_attempts_per_scene", DEFAULT_MAX_ATTEMPTS_PER_SCENE)
+        self.max_usd_per_month = self.cfg.get("max_usd_per_month")  # None = no cap
+        # Models whose clips never cost anything (they're paused instead of billed).
+        self.free_models = {p.model for p in self.providers
+                            if getattr(p, "free_quota_only", False) and getattr(p, "model", None)}
+        self._reset_run()
+
+    def _reset_run(self):
+        self.usable = list(self.providers)  # models not paused so far this run
+        self.spent_usd = 0.0                # estimated cost of paid clips this month, kept up to date
+        self.stopped = None                 # why this run stopped early, if it did
 
     # --- Main entry point -------------------------------------------------
 
@@ -79,9 +106,15 @@ class VideoGenerator:
         Raises VideoGenerationError only if every scene tried failed.
         Returns the `video_scenes` rows written this run (done and failed).
         """
+        self._reset_run()
         how_many = limit or self.cfg.get("max_scene_files_per_run", DEFAULT_MAX_SCENE_FILES_PER_RUN)
-        log.info("settings: provider=%s max_scene_files_per_run=%s max_attempts_per_scene=%s",
-                 self.provider.name, how_many, self.max_attempts)
+        log.info("settings: models (in order)=%s max_scene_files_per_run=%s max_attempts_per_scene=%s "
+                 "max_usd_per_month=%s", ", ".join(_describe(p) for p in self.providers), how_many,
+                 self.max_attempts, self.max_usd_per_month if self.max_usd_per_month is not None else "no cap")
+        if self.max_usd_per_month is not None:
+            self.spent_usd = self._paid_spend_this_month()
+            log.info("estimated spend on paid clips this month so far: ~$%.3f of $%s (~$%.3f left)",
+                     self.spent_usd, self.max_usd_per_month, max(self.max_usd_per_month - self.spent_usd, 0))
 
         waiting = self._scene_files_waiting_for_clips()
         if not waiting:
@@ -101,11 +134,18 @@ class VideoGenerator:
 
         rows = []
         for number, (scene_file, _) in enumerate(batch, start=1):
+            if self.stopped:
+                break
             log.info("[%d/%d] scene file #%s (script #%s)", number, len(batch), scene_file["id"],
                      scene_file["script_id"])
             rows += self.generate_clips(scene_file)
 
         self._log_summary(rows)
+        if self.stopped:
+            log.warning("stopped early: %s. The scenes not reached are left for the next run, with no "
+                        "attempts used.", self.stopped)
+        if not rows and self.stopped and not self.usable:
+            raise VideoGenerationError(f"no clips made: {self.stopped}")
         failed = [row for row in rows if row["status"] == "failed"]
         if failed and len(failed) == len(rows):
             raise VideoGenerationError(f"all {len(failed)} scene(s) failed; see the errors above")
@@ -126,9 +166,24 @@ class VideoGenerator:
 
         results = []
         for number, scene in enumerate(to_try, start=1):
+            if self._should_stop():
+                break
             previous = rows.get(scene["index"])
-            results.append(self._make_one_clip(scene_file, scene, previous, folder, number, len(to_try)))
+            row = self._make_one_clip(scene_file, scene, previous, folder, number, len(to_try))
+            if row is None:  # every model turned out to be paused
+                self._should_stop()
+                break
+            results.append(row)
         return results
+
+    def _should_stop(self):
+        """True (and self.stopped set) if no model is left or the monthly spending cap is reached."""
+        if not self.usable:
+            self.stopped = self.stopped or "every model is paused (free quota or usage limit reached)"
+        elif self.max_usd_per_month is not None and self.spent_usd >= self.max_usd_per_month:
+            self.stopped = (f"estimated spend on paid clips this month (~${self.spent_usd:.3f}) reached "
+                            f"max_usd_per_month (${self.max_usd_per_month}); clips start again on the 1st")
+        return self.stopped is not None
 
     # --- Making one clip ---------------------------------------------------
 
@@ -137,7 +192,8 @@ class VideoGenerator:
 
         `previous` is the scene's existing `video_scenes` row (from an
         earlier failed attempt), or None the first time. Never raises: a
-        failure is logged and recorded as "failed".
+        failure is logged and recorded as "failed". Returns None, recording
+        nothing, if every model turned out to be paused.
         """
         attempt = (previous["attempts"] if previous else 0) + 1
         # e.g. 2026-11-05/script_7_the-town-that-vanished/scene_000.mp4
@@ -147,8 +203,12 @@ class VideoGenerator:
         log.debug("  scene %d full visual prompt: %s", scene["index"], scene["visual_prompt"])
 
         started = time.monotonic()
+        provider = None
         try:
-            clip = self.provider.generate(scene["visual_prompt"], scene["duration"])
+            provider, clip = self._generate_with_first_usable_model(scene)
+            if provider is None:
+                return None  # every model is paused; the scene is left as it was
+            self._add_to_spend(provider, clip)
             log.info("    clip made in %.1fs: %s, %s %s, %ss, %s tokens, %s", time.monotonic() - started,
                      _size(len(clip.video)), clip.resolution, clip.ratio, clip.seconds, clip.tokens,
                      _dollars(clip.cost_usd))
@@ -164,7 +224,45 @@ class VideoGenerator:
                           time.monotonic() - started, attempt, self.max_attempts, error, next_step)
             result = {"status": "failed", "file_path": None, "error": str(error)[:MAX_ERROR_CHARS]}
 
-        return self._record_attempt(scene_file, scene, previous, attempt, result)
+        return self._record_attempt(scene_file, scene, previous, attempt, result, provider or self.usable[0])
+
+    def _generate_with_first_usable_model(self, scene):
+        """(provider, clip) from the first model that isn't paused, or (None, None) if all are.
+
+        A model that reports it is paused (ModelUnavailable) is dropped for the
+        rest of the run and the next one is tried right away. Any other error
+        is the scene's failure and is raised as usual.
+        """
+        while self.usable:
+            provider = self.usable[0]
+            try:
+                return provider, provider.generate(scene["visual_prompt"], scene["duration"])
+            except ModelUnavailable as error:
+                self.usable.pop(0)
+                next_model = _describe(self.usable[0]) if self.usable else "none left"
+                log.warning("    model %s can't be used now, so it is skipped for the rest of this run (this "
+                            "doesn't count as an attempt). Next model: %s. Reason: %s", _describe(provider),
+                            next_model, error)
+        return None, None
+
+    def _add_to_spend(self, provider, clip):
+        """Count a paid clip's estimated cost toward max_usd_per_month."""
+        if getattr(provider, "free_quota_only", False):
+            return
+        if clip.cost_usd is None:
+            log.warning("    clip cost unknown (no usd_per_million_tokens for %s), so max_usd_per_month can't "
+                        "count it", _describe(provider))
+            return
+        self.spent_usd += clip.cost_usd
+
+    def _paid_spend_this_month(self):
+        """Estimated cost of the clips made this calendar month (UTC), leaving out free-quota models."""
+        month = datetime.now(timezone.utc).strftime("%Y-%m")  # e.g. "2026-11"
+        rows = self.db.select("video_scenes", {"status": "eq.done"})
+        return sum(float(row["cost_usd"]) for row in rows
+                   if row.get("cost_usd") is not None
+                   and str(row.get("updated_at") or row.get("created_at") or "")[:7] == month
+                   and row.get("model") not in self.free_models)
 
     def _worth_trying(self, row):
         """True if a scene with this `video_scenes` row (None = never tried) should be tried now."""
@@ -227,10 +325,10 @@ class VideoGenerator:
         rows = self.db.select("video_scenes", {"scene_file_id": f"eq.{scene_file['id']}"})
         return {row["scene_index"]: row for row in rows}
 
-    def _record_attempt(self, scene_file, scene, previous, attempt, result):
+    def _record_attempt(self, scene_file, scene, previous, attempt, result, provider):
         """Write the outcome to the scene's one `video_scenes` row (made on its first attempt)."""
         now = datetime.now(timezone.utc).isoformat()
-        values = {**result, "provider": self.provider.name, "attempts": attempt, "updated_at": now}
+        values = {**result, "provider": provider.name, "attempts": attempt, "updated_at": now}
         if previous:
             return self.db.update("video_scenes", {"id": f"eq.{previous['id']}"}, values)[0]
         return self.db.insert("video_scenes", {
@@ -279,6 +377,12 @@ def _preview(text, limit=PREVIEW_CHARS):
     """The start of `text` on one line, for log messages."""
     one_line = " ".join(str(text or "").split())
     return one_line if len(one_line) <= limit else one_line[:limit - 3] + "..."
+
+
+def _describe(provider):
+    """e.g. "seedance-1-0-pro-fast-251015 (free quota only)", for log lines."""
+    label = getattr(provider, "label", None) or provider.name
+    return f"{label} (free quota only)" if getattr(provider, "free_quota_only", False) else label
 
 
 def _clip_details(clip):

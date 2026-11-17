@@ -26,3 +26,13 @@ class VideoProvider(ABC):
     @abstractmethod
     def generate(self, prompt: str, duration: float) -> Clip:
         """Generate a clip for the prompt."""
+
+
+class ModelUnavailable(RuntimeError):
+    """This model can't make clips right now, through no fault of the scene.
+
+    For example its free quota is used up and BytePlus has paused it
+    ("SetLimitExceeded"), or it hasn't been activated. The video stage then
+    switches to the next model in the config for the rest of the run, and the
+    scene's attempt isn't counted.
+    """
