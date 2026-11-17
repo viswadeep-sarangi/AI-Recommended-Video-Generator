@@ -87,6 +87,11 @@ alter table avgen.audio_files add column if not exists details jsonb;
 alter table avgen.audio_files add column if not exists words jsonb;
 alter table avgen.audio_files add column if not exists transcription_model text;
 alter table avgen.audio_files add column if not exists transcription_cost_usd numeric(12, 6);
+-- captions.srt saved next to the narration. Captions are retried on their own count
+-- (caption_attempts), so a caption failure never uses up the narration's attempts.
+alter table avgen.audio_files add column if not exists captions_path text;
+alter table avgen.audio_files add column if not exists caption_attempts int not null default 0;
+alter table avgen.audio_files add column if not exists caption_error text;
 create table if not exists avgen.final_videos (
   id bigint generated always as identity primary key,
   script_id bigint references avgen.scripts(id), file_path text,

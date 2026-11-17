@@ -1,5 +1,6 @@
 """Subtitles: groups the narration's word timings into short captions and
-writes them as an .ass subtitle file, which ffmpeg burns into the video.
+writes them as an .ass subtitle file, which ffmpeg burns into the video, or
+as a plain .srt file (saved next to each narration, for YouTube captions).
 
 Everything about how they look comes from the "subtitles" part of the
 "assemble" config, e.g. blue text with a yellow border:
@@ -131,6 +132,13 @@ def to_ass(captions, style=None, width=1080, height=1920):
     return "\n".join(lines) + "\n"
 
 
+def to_srt(captions):
+    """The captions as an .srt file (text), the plain format YouTube and most players accept."""
+    blocks = [f"{number}\n{_srt_time(caption['start'])} --> {_srt_time(caption['end'])}\n{caption['text']}\n"
+              for number, caption in enumerate(captions, start=1)]
+    return "\n".join(blocks)
+
+
 def ass_colour(value):
     """"#RRGGBB" or "#RRGGBBAA" (AA = opacity) -> .ass "&HAABBGGRR" (AA = transparency)."""
     hex_digits = str(value).lstrip("#")
@@ -147,6 +155,14 @@ def _ass_time(seconds):
     hours, centis = divmod(centis, 360000)
     minutes, centis = divmod(centis, 6000)
     return f"{hours}:{minutes:02d}:{centis // 100:02d}.{centis % 100:02d}"
+
+
+def _srt_time(seconds):
+    """e.g. 75.456 -> "00:01:15,456"."""
+    millis = int(round(max(seconds, 0) * 1000))
+    hours, millis = divmod(millis, 3600000)
+    minutes, millis = divmod(millis, 60000)
+    return f"{hours:02d}:{minutes:02d}:{millis // 1000:02d},{millis % 1000:03d}"
 
 
 def _ass_text(text):

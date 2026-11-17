@@ -4,7 +4,7 @@ import pytest
 
 from avgen.audio import Narration, Transcript, create_transcriber, create_voice
 from avgen.audio_generator import AudioGenerationError, AudioGenerator
-from avgen.captions import ass_colour, group_words, to_ass
+from avgen.captions import ass_colour, group_words, to_ass, to_srt
 from avgen import assembler
 from avgen.assembler import Assembler, AssemblyError, build_ffmpeg_cmd, plan_timing
 from avgen.config import _resolve
@@ -644,6 +644,10 @@ def test_audio_adds_word_timings_and_backfills_old_narrations():
     assert voice.texts == ["t1"] and transcriber.calls == 2
     assert [(r["script_id"], r["status"], len(r["words"])) for r in rows] == [(1, "done", 9), (2, "done", 9)]
     assert rows[0]["transcription_model"] == "whisper-1" and rows[0]["cost_usd"] == 0.0075  # narration cost kept
+    assert rows[0]["attempts"] == 1 and rows[0]["caption_attempts"] == 1  # captions don't use up narration attempts
+    srt = db.files[("audio", rows[0]["captions_path"])]
+    assert rows[0]["captions_path"] == rows[0]["narration_path"].replace("narration.mp3", "captions.srt")
+    assert srt.startswith("1\n00:00:00,000 --> ")
     assert AudioGenerator(db, voice, cfg={}, transcriber=transcriber).run() == []
 
 
@@ -662,3 +666,37 @@ def test_openai_transcriber_asks_for_word_timings(monkeypatch):
     assert sent["url"].endswith("/audio/transcriptions")
     assert sent["data"]["timestamp_granularities[]"] == "word" and sent["data"]["response_format"] == "verbose_json"
     assert transcript.words[0] == {"word": "Hi", "start": 0.0, "end": 0.4} and transcript.cost_usd == 0.003
+
+
+def test_srt_numbers_and_times_each_caption():
+    srt = to_srt([{"text": "The town", "start": 0.0, "end": 0.55}, {"text": "vanished", "start": 61.2, "end": 62.0}])
+    assert srt == "1\n00:00:00,000 --> 00:00:00,550\nThe town\n\n2\n00:01:01,200 --> 00:01:02,000\nvanished\n"
+
+
+def test_audio_adds_missing_srt_without_transcribing_again():
+    db = _db_with_narration_ready(1)
+    AudioGenerator(db, FakeVoice(), cfg={}).run()
+    db.tables["audio_files"][0]["words"] = WORDS  # word timings made by an earlier version, but no captions.srt
+    transcriber = FakeTranscriber()
+    rows = AudioGenerator(db, FakeVoice(), cfg={}, transcriber=transcriber).run()
+    assert transcriber.calls == 0 and rows[0]["captions_path"].endswith("/captions.srt")
+
+
+class BrokenTranscriber(FakeTranscriber):
+    def transcribe(self, audio, seconds=None, script_text=None):
+        self.calls += 1
+        raise RuntimeError("transcription down")
+
+
+def test_audio_keeps_the_narration_when_captions_fail_and_retries_only_the_captions():
+    db = _db_with_narration_ready(1)
+    voice = FakeVoice()
+    gen = AudioGenerator(db, voice, cfg={"max_attempts_per_script": 2}, transcriber=BrokenTranscriber())
+    with pytest.raises(AudioGenerationError):
+        gen.run()  # narration made, captions failed
+    row = db.tables["audio_files"][0]
+    assert (row["status"], row["attempts"], row["caption_attempts"]) == ("done", 1, 1)
+    with pytest.raises(AudioGenerationError):
+        gen.run()  # only the captions are tried again
+    assert voice.texts == ["t0"] and db.tables["audio_files"][0]["caption_attempts"] == 2
+    assert gen.run() == []  # captions given up on; the narration is still there for the video

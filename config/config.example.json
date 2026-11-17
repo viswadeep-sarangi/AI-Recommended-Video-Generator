@@ -83,7 +83,9 @@
       "api_key": "env:OPENAI_API_KEY",
       "model": "whisper-1",
       "language": "en",
-      "usd_per_minute": 0.006
+      "usd_per_minute": 0.006,
+      "srt_min_words": 3,
+      "srt_max_words": 8
     }
   },
   "assemble": {
