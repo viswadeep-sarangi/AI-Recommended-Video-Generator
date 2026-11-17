@@ -27,25 +27,40 @@ Style settings (any left out use DEFAULT_STYLE below):
   margin_vertical  distance in pixels from the bottom (or top) edge
   margin_horizontal  space in pixels kept free on the left and right
   letter_spacing   extra pixels between letters
-"""
 
-# How captions look when the config doesn't say: big, bold, white with a
-# black outline, in the lower third of a 1080x1920 video.
+The words shown are the script's own words (align_to_script): the
+transcription only supplies the timing. So numbers stay whole ("36,000",
+not "36" and ",000" in different captions), names are spelled as written,
+and anything the transcription model invented (words in another alphabet,
+stray symbols) never appears. Text is kept to plain English letters,
+digits and punctuation (clean_text).
+"""
+import difflib
+import re
+import unicodedata
+
+# Bump this when the way captions are made changes: the audio stage then
+# rebuilds every narration's captions.srt (from the saved word timings, no
+# new transcription) on its next run.
+CAPTIONS_VERSION = 2
+
+# How captions look when the config doesn't say: bold, white with a black
+# outline, low in the frame of a 1080x1920 video.
 DEFAULT_STYLE = {
     "font": "DejaVu Sans",
-    "font_size": 84,
+    "font_size": 58,
     "bold": True,
     "italic": False,
     "uppercase": False,
     "color": "#FFFFFF",
     "outline_color": "#000000",
-    "outline_width": 6,
+    "outline_width": 4,
     "shadow_color": "#00000080",
-    "shadow_depth": 3,
+    "shadow_depth": 2,
     "box": False,
     "box_color": "#000000B0",
     "position": "bottom",
-    "margin_vertical": 520,
+    "margin_vertical": 150,
     "margin_horizontal": 80,
     "letter_spacing": 0,
 }
@@ -62,6 +77,129 @@ JOIN_GAP_SECONDS = 0.35
 
 POSITIONS = {"bottom": 2, "middle": 5, "top": 8}  # .ass "Alignment" values (centred horizontally)
 SENTENCE_END = (".", "!", "?", ",", ";", ":")
+
+# Typographic characters turned into their plain equivalents before anything
+# outside plain English text is dropped.
+PLAIN_EQUIVALENTS = str.maketrans({
+    "‘": "'", "’": "'", "‚": "'", "‛": "'",
+    "“": '"', "”": '"', "„": '"',
+    "–": "-", "—": "-", "−": "-",
+    "…": "...", " ": " ",
+})
+
+# Matching runs shorter than this many letters are ignored when lining the
+# transcription up with the script, so a stray letter can't borrow the
+# timing of an unrelated word.
+MIN_MATCH_CHARS = 2
+
+
+def clean_text(text):
+    """Plain English text: accents removed (café -> cafe), curly quotes and
+    dashes made plain, and any other character (another alphabet, emoji,
+    symbols) dropped."""
+    text = unicodedata.normalize("NFKD", str(text).translate(PLAIN_EQUIVALENTS))
+    text = text.encode("ascii", "ignore").decode("ascii")
+    return " ".join("".join(c for c in text if c.isprintable()).split())
+
+
+def clean_words(words):
+    """Transcribed word timings with clean text, empty words dropped and
+    split numbers joined back up ("36" + ",000" -> "36,000")."""
+    cleaned = []
+    for word in words:
+        text = clean_text(word.get("word", "")).replace(" ", "")
+        if cleaned and text and _continues_number(cleaned[-1]["word"], text):
+            cleaned[-1] = {"word": cleaned[-1]["word"] + text, "start": cleaned[-1]["start"], "end": word["end"]}
+        elif _key(text):
+            cleaned.append({"word": text, "start": float(word["start"]), "end": float(word["end"])})
+    return cleaned
+
+
+def align_to_script(words, script_text):
+    """The script's own words, each timed from the transcription.
+
+    The script and the transcription are compared letter by letter
+    (ignoring case, spaces and punctuation); each script word takes its
+    time from the transcribed words its letters matched. Script words with
+    no match (e.g. "36,000" in the script but "thirty-six thousand" heard)
+    share the time between their neighbours. If nothing matches at all,
+    the cleaned-up transcription is used instead.
+    """
+    tokens = [token for token in (clean_text(t) for t in str(script_text or "").split()) if _key(token)]
+    heard = clean_words(words)
+    if not tokens or not heard:
+        return heard
+
+    script_letters, script_owner = _letters(tokens)
+    heard_letters, heard_owner = _letters([word["word"] for word in heard])
+    starts, ends = [None] * len(tokens), [None] * len(tokens)
+    matcher = difflib.SequenceMatcher(None, script_letters, heard_letters, autojunk=False)
+    for script_at, heard_at, size in matcher.get_matching_blocks():
+        if size < MIN_MATCH_CHARS:
+            continue
+        for offset in range(size):
+            token, word = script_owner[script_at + offset], heard[heard_owner[heard_at + offset]]
+            starts[token] = word["start"] if starts[token] is None else min(starts[token], word["start"])
+            ends[token] = word["end"] if ends[token] is None else max(ends[token], word["end"])
+    if all(start is None for start in starts):
+        return heard
+
+    # the end of everything heard, including words dropped while cleaning up
+    last_end = max(float(word["end"]) for word in words)
+    _fill_gaps(tokens, starts, ends, heard[0]["start"], last_end)
+    aligned, previous_end = [], 0.0
+    for token, start, end in zip(tokens, starts, ends):
+        start = max(start, previous_end) if aligned else start
+        end = max(end, start)
+        aligned.append({"word": token, "start": round(start, 3), "end": round(end, 3)})
+        previous_end = end
+    return aligned
+
+
+def _key(text):
+    """Only the letters and digits, lower case: what is compared between script and transcription."""
+    return re.sub(r"[^a-z0-9]", "", text.lower())
+
+
+def _letters(texts):
+    """All the letters of `texts` as one string, and which text each letter came from."""
+    letters, owner = [], []
+    for index, text in enumerate(texts):
+        key = _key(text)
+        letters.append(key)
+        owner += [index] * len(key)
+    return "".join(letters), owner
+
+
+def _fill_gaps(tokens, starts, ends, first_start, last_end):
+    """Give runs of unmatched script words the time between their matched neighbours, by length."""
+    i = 0
+    while i < len(tokens):
+        if starts[i] is not None:
+            i += 1
+            continue
+        j = i
+        while j < len(tokens) and starts[j] is None:
+            j += 1
+        low = ends[i - 1] if i > 0 else first_start
+        high = starts[j] if j < len(tokens) else last_end
+        high = max(high, low)
+        weights = [max(len(_key(token)), 1) for token in tokens[i:j]]
+        at = low
+        for k, weight in zip(range(i, j), weights):
+            starts[k] = at
+            at += (high - low) * weight / sum(weights)
+            ends[k] = at
+        i = j
+
+
+def _continues_number(previous, text):
+    """True if `text` is the rest of a number split off `previous` ("36" + ",000", "1" + ".5", "36" + "%")."""
+    if re.match(r"^[.,]\d", text) and re.search(r"\d$", previous):
+        return True
+    if re.match(r"^\d", text) and re.search(r"\d[.,]$", previous):
+        return True
+    return bool(re.match(r"^%", text)) and bool(re.search(r"\d$", previous))
 
 
 def group_words(words, min_words=DEFAULT_MIN_WORDS, max_words=DEFAULT_MAX_WORDS,

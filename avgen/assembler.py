@@ -188,7 +188,7 @@ class Assembler:
                 timing = plan_timing(planned, clip_seconds, narration_seconds)
                 self._log_timing(timing, narration_seconds)
 
-                subtitle_file = self._write_subtitles(tmp, audio)
+                subtitle_file = self._write_subtitles(tmp, audio, script)
 
                 out = tmp / "final.mp4"
                 run_ffmpeg(build_ffmpeg_cmd(clip_files, timing, narration, music, out, self.music_volume,
@@ -225,8 +225,13 @@ class Assembler:
 
         return self._record_attempt(script, previous, attempt, result)
 
-    def _write_subtitles(self, folder, audio):
-        """Write the captions file for this narration into `folder`; returns its name, or None for none."""
+    def _write_subtitles(self, folder, audio, script):
+        """Write the captions file for this narration into `folder`; returns its name, or None for none.
+
+        The words are lined up with the script again (as the audio stage
+        does), so even narrations whose word timings were saved by an older
+        version show the script's own words: whole numbers, plain English.
+        """
         self._caption_count = 0
         if not self.subtitles["enabled"]:
             return None
@@ -236,6 +241,14 @@ class Assembler:
                         "\"captions\" in the audio config; the audio stage adds them on its next run)",
                         audio["script_id"])
             return None
+        try:
+            text = self.db.download("scripts", script["file_path"])
+            text = text.decode("utf-8") if isinstance(text, bytes) else text
+        except Exception as error:
+            log.warning("  couldn't download the script to check the subtitle words (%s); using the "
+                        "transcription's words, cleaned up", error)
+            text = None
+        words = captions.align_to_script(words, text)
         grouped = captions.group_words(
             words,
             min_words=self.subtitles.get("min_words", captions.DEFAULT_MIN_WORDS),

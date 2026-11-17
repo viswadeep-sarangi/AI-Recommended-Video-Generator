@@ -4,7 +4,7 @@ import pytest
 
 from avgen.audio import Narration, Transcript, create_transcriber, create_voice
 from avgen.audio_generator import AudioGenerationError, AudioGenerator
-from avgen.captions import ass_colour, group_words, to_ass, to_srt
+from avgen.captions import CAPTIONS_VERSION, align_to_script, ass_colour, clean_text, clean_words, group_words, to_ass, to_srt
 from avgen import assembler
 from avgen.assembler import Assembler, AssemblyError, build_ffmpeg_cmd, plan_timing
 from avgen.config import _resolve
@@ -700,3 +700,44 @@ def test_audio_keeps_the_narration_when_captions_fail_and_retries_only_the_capti
         gen.run()  # only the captions are tried again
     assert voice.texts == ["t0"] and db.tables["audio_files"][0]["caption_attempts"] == 2
     assert gen.run() == []  # captions given up on; the narration is still there for the video
+
+
+def test_clean_text_keeps_plain_english_only():
+    assert clean_text("Café “dreams” — пока 你好 done…") == 'Cafe "dreams" - done...'
+
+
+def test_clean_words_joins_split_numbers_and_drops_foreign_words():
+    heard = [{"word": "It", "start": 0.0, "end": 0.2}, {"word": "cost", "start": 0.2, "end": 0.5},
+             {"word": "36", "start": 0.5, "end": 0.8}, {"word": ",000", "start": 0.8, "end": 1.2},
+             {"word": "пока", "start": 1.2, "end": 1.4}, {"word": "1.", "start": 1.4, "end": 1.5},
+             {"word": "5", "start": 1.5, "end": 1.6}, {"word": "%", "start": 1.6, "end": 1.7}]
+    assert [(w["word"], w["start"], w["end"]) for w in clean_words(heard)] == [
+        ("It", 0.0, 0.2), ("cost", 0.2, 0.5), ("36,000", 0.5, 1.2), ("1.5%", 1.4, 1.7)]
+
+
+def test_align_to_script_shows_the_script_words_with_the_heard_timing():
+    heard = [{"word": "The", "start": 0.0, "end": 0.2}, {"word": "prize", "start": 0.2, "end": 0.5},
+             {"word": "was", "start": 0.5, "end": 0.7}, {"word": "36", "start": 0.7, "end": 1.0},
+             {"word": ",000", "start": 1.0, "end": 1.4}, {"word": "dollers", "start": 1.4, "end": 1.8},
+             {"word": "пока", "start": 1.8, "end": 2.4}]
+    aligned = align_to_script(heard, "The prize was 36,000 dollars. Wow!")
+    assert [w["word"] for w in aligned] == ["The", "prize", "was", "36,000", "dollars.", "Wow!"]
+    by_word = {w["word"]: (w["start"], w["end"]) for w in aligned}
+    assert by_word["36,000"] == (0.7, 1.4) and by_word["dollars."][0] == 1.4
+    assert by_word["Wow!"][1] == 2.4  # not heard: fills the time after the last match
+    captions = group_words(aligned, 2, 4)
+    assert captions[0]["text"] == "The prize was 36,000"  # the number is never split across captions
+    # a script that doesn't match at all falls back to the cleaned-up transcription
+    assert [w["word"] for w in align_to_script(heard[:3], "Completely different")] == ["The", "prize", "was"]
+
+
+def test_audio_rebuilds_captions_made_by_an_older_version():
+    db = _db_with_narration_ready(1)
+    AudioGenerator(db, FakeVoice(), cfg={}, transcriber=FakeTranscriber()).run()
+    row = db.tables["audio_files"][0]
+    assert row["captions_version"] == CAPTIONS_VERSION
+    row.update(captions_version=1, caption_attempts=3)  # made the old way, attempts used up back then
+    transcriber = FakeTranscriber()
+    rows = AudioGenerator(db, FakeVoice(), cfg={}, transcriber=transcriber).run()
+    assert transcriber.calls == 0  # rebuilt from the saved word timings
+    assert (rows[0]["captions_version"], rows[0]["caption_attempts"]) == (CAPTIONS_VERSION, 1)

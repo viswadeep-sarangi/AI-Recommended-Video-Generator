@@ -92,6 +92,9 @@ alter table avgen.audio_files add column if not exists transcription_cost_usd nu
 alter table avgen.audio_files add column if not exists captions_path text;
 alter table avgen.audio_files add column if not exists caption_attempts int not null default 0;
 alter table avgen.audio_files add column if not exists caption_error text;
+-- Which way of making captions made this row's captions.srt (captions.CAPTIONS_VERSION); older
+-- ones are rebuilt on the next audio run from the saved word timings.
+alter table avgen.audio_files add column if not exists captions_version int;
 create table if not exists avgen.final_videos (
   id bigint generated always as identity primary key,
   script_id bigint references avgen.scripts(id), file_path text,

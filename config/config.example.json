@@ -109,19 +109,19 @@
       "max_pause_seconds": 0.6,
       "style": {
         "font": "DejaVu Sans",
-        "font_size": 84,
+        "font_size": 58,
         "bold": true,
         "italic": false,
         "uppercase": false,
         "color": "#FFFFFF",
         "outline_color": "#000000",
-        "outline_width": 6,
+        "outline_width": 4,
         "shadow_color": "#00000080",
-        "shadow_depth": 3,
+        "shadow_depth": 2,
         "box": false,
         "box_color": "#000000B0",
         "position": "bottom",
-        "margin_vertical": 520,
+        "margin_vertical": 150,
         "margin_horizontal": 80,
         "letter_spacing": 0
       }

@@ -156,7 +156,7 @@ class AudioGenerator:
 
         if narrated:
             log.info("[%d/%d] script #%s: narration already made, adding captions (caption attempt %d/%d)",
-                     number, total, script["id"], (previous.get("caption_attempts") or 0) + 1, self.max_attempts)
+                     number, total, script["id"], self._caption_attempts(previous) + 1, self.max_attempts)
         else:
             started = time.monotonic()
             try:
@@ -217,13 +217,18 @@ class AudioGenerator:
         return self._save(script, previous, values), False, None
 
     def _add_captions(self, row, text):
-        """Word timings (if missing) and captions.srt (if missing) for a finished narration.
+        """Word timings (if missing) and an up-to-date captions.srt for a finished narration.
+
+        The words are lined up with the script (captions.align_to_script),
+        so the captions show the script's own words: whole numbers, plain
+        English, nothing the transcription invented. Those aligned words are
+        what's saved in `words`, for the burned-in subtitles too.
 
         `row` is the narration's row as it stands now. Returns the row's new
         values; on failure, just the counted attempt and the error, so the
         narration itself stays done.
         """
-        attempt = (row.get("caption_attempts") or 0) + 1
+        attempt = self._caption_attempts(row) + 1
         started = time.monotonic()
         try:
             values = {}
@@ -234,15 +239,19 @@ class AudioGenerator:
                 words = transcript.words
                 log.info("  word timings from %s in %.1fs: %d word(s), %s", transcript.model,
                          time.monotonic() - started, len(words), _dollars(transcript.cost_usd))
-                log.debug("  words: %s", " ".join(word["word"] for word in words))
-                values.update(words=words, transcription_model=transcript.model,
-                              transcription_cost_usd=transcript.cost_usd)
+                log.debug("  heard: %s", " ".join(word["word"] for word in words))
+                values.update(transcription_model=transcript.model, transcription_cost_usd=transcript.cost_usd)
 
+            words = captions.align_to_script(words, text)
+            if not words:
+                raise RuntimeError("no usable words to make captions from")
+            log.debug("  caption words: %s", " ".join(word["word"] for word in words))
             lines = captions.group_words(words, self.srt_min_words, self.srt_max_words)
             captions_path = f"{row['narration_path'].rsplit('/', 1)[0]}/{CAPTIONS_FILE}"
             self.db.upload("audio", captions_path, captions.to_srt(lines), "application/x-subrip")
             log.info("  captions saved to the audio bucket: %s (%d line(s))", captions_path, len(lines))
-            return {**values, "captions_path": captions_path, "caption_attempts": attempt, "caption_error": None}
+            return {**values, "words": words, "captions_path": captions_path, "caption_attempts": attempt,
+                    "caption_error": None, "captions_version": captions.CAPTIONS_VERSION}
         except Exception as error:
             if attempt < self.max_attempts:
                 next_step = "the next run will try them again"
@@ -251,22 +260,35 @@ class AudioGenerator:
             log.exception("  captions for script #%s failed after %.1fs (caption attempt %d/%d): %s. The narration "
                           "is kept; %s.", row.get("script_id"), time.monotonic() - started, attempt,
                           self.max_attempts, error, next_step)
-            return {"caption_attempts": attempt, "caption_error": str(error)[:MAX_ERROR_CHARS]}
+            return {"caption_attempts": attempt, "caption_error": str(error)[:MAX_ERROR_CHARS],
+                    "captions_version": captions.CAPTIONS_VERSION}
 
     def _needs_captions(self, row):
-        return self.transcriber is not None and not (row.get("words") and row.get("captions_path"))
+        """True if captions are on and this narration's word timings or captions.srt are missing or out of date."""
+        if self.transcriber is None:
+            return False
+        up_to_date = row.get("captions_version") == captions.CAPTIONS_VERSION and row.get("caption_error") is None
+        return not (row.get("words") and row.get("captions_path") and up_to_date)
+
+    @staticmethod
+    def _caption_attempts(row):
+        """Caption attempts so far, for the current way of making captions (a new CAPTIONS_VERSION starts at 0)."""
+        if row.get("captions_version") != captions.CAPTIONS_VERSION:
+            return 0
+        return row.get("caption_attempts") or 0
 
     def _worth_trying(self, row):
         """True if a script with this `audio_files` row (None = never tried) should be worked on now.
 
         That is: never tried, failed with attempts left, or narrated but
-        missing word timings or captions.srt (with caption attempts left).
+        missing word timings or an up-to-date captions.srt (with caption
+        attempts left).
         """
         if row is None:
             return True
         if row.get("status", "done") != "done":
             return (row.get("attempts") or 0) < self.max_attempts
-        return self._needs_captions(row) and (row.get("caption_attempts") or 0) < self.max_attempts
+        return self._needs_captions(row) and self._caption_attempts(row) < self.max_attempts
 
     # --- Logging ------------------------------------------------------------
 
