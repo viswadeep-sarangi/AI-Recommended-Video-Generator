@@ -42,7 +42,7 @@ in the "assemble" config section:
     "max_attempts_per_script": 3,
     "music_volume": 0.15,
     "output": {"width": 1080, "height": 1920, "fps": 30, "fit": "crop", ...},
-    "subtitles": {"enabled": true, "min_words": 2, "max_words": 4, "style": {...}},
+    "subtitles": {"enabled": true, "min_words": 2, "max_words": 3, "style": {...}},
 """
 import json
 import logging

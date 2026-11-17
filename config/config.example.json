@@ -108,11 +108,11 @@
     "subtitles": {
       "enabled": true,
       "min_words": 2,
-      "max_words": 4,
+      "max_words": 3,
       "max_pause_seconds": 0.6,
       "style": {
         "font": "DejaVu Sans",
-        "font_size": 58,
+        "font_size": 64,
         "bold": true,
         "italic": false,
         "uppercase": false,
@@ -124,8 +124,8 @@
         "box": false,
         "box_color": "#000000B0",
         "position": "bottom",
-        "margin_vertical": 150,
-        "margin_horizontal": 80,
+        "margin_vertical": 600,
+        "margin_horizontal": 120,
         "letter_spacing": 0
       }
     }

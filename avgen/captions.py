@@ -48,7 +48,7 @@ CAPTIONS_VERSION = 2
 # outline, low in the frame of a 1080x1920 video.
 DEFAULT_STYLE = {
     "font": "DejaVu Sans",
-    "font_size": 58,
+    "font_size": 64,
     "bold": True,
     "italic": False,
     "uppercase": False,
@@ -60,15 +60,15 @@ DEFAULT_STYLE = {
     "box": False,
     "box_color": "#000000B0",
     "position": "bottom",
-    "margin_vertical": 150,
-    "margin_horizontal": 80,
+    "margin_vertical": 600,
+    "margin_horizontal": 120,
     "letter_spacing": 0,
 }
 
-# How words are grouped when the config doesn't say: 2 to 4 per caption,
+# How words are grouped when the config doesn't say: 2 to 3 per caption,
 # and a new caption after a pause longer than this many seconds.
 DEFAULT_MIN_WORDS = 2
-DEFAULT_MAX_WORDS = 4
+DEFAULT_MAX_WORDS = 3
 DEFAULT_MAX_PAUSE_SECONDS = 0.6
 
 # A caption stays up until the next one starts if the gap is shorter than
